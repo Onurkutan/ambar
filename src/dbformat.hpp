@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Onur Kutan.  MIT licence; see LICENSE.
+//
 // Internal keys: the representation everything below the public API speaks.
 //
 // A user key on its own cannot answer "which of these two copies is newer?", and

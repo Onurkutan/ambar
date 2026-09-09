@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Onur Kutan.  MIT licence; see LICENSE.
+//
 // The write-ahead log: the file that makes a crash survivable.
 //
 // Format, one 32 KiB block at a time:

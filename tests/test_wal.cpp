@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Onur Kutan.  MIT licence; see LICENSE.
+
 #include "harness.hpp"
 
 #include <cstdio>

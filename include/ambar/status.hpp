@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Onur Kutan.  MIT licence; see LICENSE.
+//
 // A returned error, not a thrown one.
 //
 // Storage code spends most of its life reacting to I/O that went wrong, and

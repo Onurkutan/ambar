@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Onur Kutan.  MIT licence; see LICENSE.
+//
 // A test harness in sixty lines, so the project has no dependency to install.
 //
 // Registers each TEST() at static-initialisation time and runs them all from

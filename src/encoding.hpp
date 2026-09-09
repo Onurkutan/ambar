@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Onur Kutan.  MIT licence; see LICENSE.
+//
 // On-disk primitives: integers, checksums, and the framing every record uses.
 //
 // Everything Ambar writes goes through here, so the format is defined in one

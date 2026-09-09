@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Onur Kutan.  MIT licence; see LICENSE.
+//
 // The thin layer between Ambar and the operating system.
 //
 // Kept deliberately small: three file abstractions and one honest fsync.  The

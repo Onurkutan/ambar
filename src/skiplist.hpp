@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Onur Kutan.  MIT licence; see LICENSE.
+//
 // A skip list that one thread writes and any number read, without locking the
 // readers.
 //

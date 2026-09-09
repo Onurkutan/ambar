@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Onur Kutan.  MIT licence; see LICENSE.
+//
 // The in-memory half of the tree: everything written but not yet on disk as a
 // table.
 //

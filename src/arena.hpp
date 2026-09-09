@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Onur Kutan.  MIT licence; see LICENSE.
+//
 // A bump allocator for everything a memtable owns.
 //
 // A memtable is written once, read many times, and then thrown away whole.  That
