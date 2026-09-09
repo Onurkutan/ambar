@@ -1,5 +1,7 @@
 # Ambar
 
+[![CI](https://github.com/Onurkutan/ambar/actions/workflows/ci.yml/badge.svg)](https://github.com/Onurkutan/ambar/actions/workflows/ci.yml)
+
 A log-structured merge-tree storage engine in C++17, written from scratch: a
 write-ahead log, a concurrent skip list, immutable sorted table files with
 Bloom filters, a manifest, levelled compaction, snapshots, and a bounded block
