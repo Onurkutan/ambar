@@ -1,0 +1,30 @@
+{
+  "_comment": "Faults that only a killed process reveals. tools/mutate.py runs the unit suite, which will NOT catch these -- apply one by hand and run './build/ambar_crash_test <dir> run 10' instead. The last two entries are expected to survive; mutations/README.md says why.",
+
+  "write(): leave the log record in this process's own buffer": [
+    "src/db_impl.cpp",
+    "        status = options.sync ? log_->sync() : log_->flush();",
+    "        status = options.sync ? log_->sync() : Status::ok();"
+  ],
+  "recovery: replay only logs newer than the manifest's": [
+    "src/db_impl.cpp",
+    "    if (type == FileType::kLog && (number >= min_log || number == prev_log)) {",
+    "    if (type == FileType::kLog && number > min_log) {"
+  ],
+  "compact_memtable: retire the log one number too early": [
+    "src/db_impl.cpp",
+    "    edit.set_log_number(logfile_number_);\n    status = versions_->log_and_apply(&edit, &mutex_);",
+    "    edit.set_log_number(logfile_number_ + 1);\n    status = versions_->log_and_apply(&edit, &mutex_);"
+  ],
+
+  "EXPECTED TO SURVIVE -- write(): insert into the memtable before the log": [
+    "src/db_impl.cpp",
+    "      status = log_->add_record(WriteBatchInternal::contents(*batch));\n      if (status.is_ok()) {",
+    "      status = WriteBatchInternal::insert_into(*batch, mem_);\n      if (status.is_ok()) {\n        status = log_->add_record(WriteBatchInternal::contents(*batch));\n      }\n      if (status.is_ok()) {"
+  ],
+  "EXPECTED TO SURVIVE -- write(): never sync the log, even when asked": [
+    "src/db_impl.cpp",
+    "        status = options.sync ? log_->sync() : log_->flush();",
+    "        status = log_->flush();"
+  ]
+}

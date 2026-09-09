@@ -1,0 +1,12 @@
+# Every text file in this repository is stored as LF, regardless of what a
+# contributor's local core.autocrlf does.  tools/fault_sweep.sh is a bash
+# script read by Linux CI; a checkout that silently rewrote it to CRLF would
+# break there without a change anyone meant to make.
+* text=auto eol=lf
+
+*.sh text eol=lf
+*.py text eol=lf
+*.c text eol=lf
+*.cpp text eol=lf
+*.h text eol=lf
+*.hpp text eol=lf

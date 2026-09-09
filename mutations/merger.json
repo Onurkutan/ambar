@@ -1,0 +1,27 @@
+{
+  "prev(): drop the branch that rewinds a child whose range ends early": [
+    "src/merger.cpp",
+    "          child->seek_to_last();",
+    "          ;"
+  ],
+  "prev(): skip the direction-change fix-up entirely": [
+    "src/merger.cpp",
+    "    if (direction_ != Direction::kReverse) {",
+    "    if (false) {"
+  ],
+  "next(): skip the direction-change fix-up entirely": [
+    "src/merger.cpp",
+    "    if (direction_ != Direction::kForward) {",
+    "    if (false) {"
+  ],
+  "status(): report only the current child's status": [
+    "src/merger.cpp",
+    "    for (const auto& child : children_) {\n      if (!child->status().is_ok()) return child->status();\n    }\n    return Status::ok();",
+    "    return current_ != nullptr ? current_->status() : Status::ok();"
+  ],
+  "find_smallest(): break ties the other way (expected to survive)": [
+    "src/merger.cpp",
+    "comparator_->compare(child->key(), smallest->key()) < 0",
+    "comparator_->compare(child->key(), smallest->key()) <= 0"
+  ]
+}

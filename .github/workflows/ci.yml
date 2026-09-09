@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# No job here needs to write anything back to the repository -- read-only is
+# the least this token could be and still do its job, so it is what it gets.
+permissions:
+  contents: read
+
+jobs:
+  # Correctness under the two compilers that disagree most about what is legal.
+  linux:
+    name: linux / ${{ matrix.compiler }} / ${{ matrix.build_type }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        build_type: [Debug, Release]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Configure
+        env:
+          CC: ${{ matrix.compiler == 'gcc' && 'gcc' || 'clang' }}
+          CXX: ${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+        # Warnings are errors here rather than in CMakeLists, so a local build
+        # stays workable while CI stays strict.
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DCMAKE_CXX_FLAGS=-Werror
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        # -v names each test before it runs, so a test that crashes the process
+        # rather than failing a check can be identified from the log.
+        run: ./build/ambar_tests -v
+
+  # The build nobody runs locally, which is exactly why it belongs in CI: MSVC
+  # rejects things gcc and clang accept, and finds them the moment they appear
+  # rather than at the end of the project.
+  windows:
+    name: windows / msvc
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=/WX
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Test
+        run: .\build\Release\ambar_tests.exe -v
+
+  # Memory errors.  A storage engine hands out pointers into arenas and mapped
+  # buffers; this is the job that notices when one outlives what it points at.
+  sanitize-address:
+    name: sanitizers / address + undefined
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DAMBAR_SANITIZE=address
+      - run: cmake --build build
+      - name: Test
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          ASAN_OPTIONS: detect_leaks=1
+        run: ./build/ambar_tests -v
+
+      # Damaged and hostile files, specifically. A table file is untrusted
+      # input, and the checks that keep a malformed one from reading out of
+      # bounds are only meaningful when something is watching for it.
+      - name: Corruption suite under the sanitizers
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ./build/ambar_tests -v corrupt.
+
+  # The skip list claims to be safe for one writer and many readers, and the
+  # database claims many readers alongside a compaction thread.  This is the
+  # job that decides whether either is true.
+  #
+  # Its value is checked by mutation rather than assumed: relaxing the
+  # acquire/release pair in skiplist.hpp is mutations/skiplist.json, and this
+  # job is what turns red for it.
+  sanitize-thread:
+    name: sanitizers / thread
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DAMBAR_SANITIZE=thread
+      - run: cmake --build build
+      - name: Test
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: ./build/ambar_tests
+
+  # A crash is not a slow test, it is a different test: everything above runs
+  # the engine to completion, and the durability claims are all of the form
+  # "if the process dies here, then afterwards ...".
+  crash:
+    name: crash injection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build
+      - name: Kill a writer at random instants and verify what survived
+        run: ./build/ambar_crash_test "$RUNNER_TEMP/crash" run 12
+
+      # And the failures a kill cannot produce: one I/O call returning EIO, at
+      # every point in a workload where it would matter.
+      - name: Fail one fsync at a time across every manifest write
+        run: ./tools/fault_sweep.sh build 2

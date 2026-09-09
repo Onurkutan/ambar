@@ -1,0 +1,12 @@
+{
+  "log reader: hand back a partial record instead of refusing it": [
+    "src/wal.cpp",
+    "      // Ran out mid-record: the write never completed.\n      truncated_ = true;\n      if (failure_reason_.empty()) {\n        failure_reason_ = \"log ends in the middle of a fragmented record\";\n      }\n      return false;",
+    "      truncated_ = true;\n      *record = *scratch;\n      return true;"
+  ],
+  "write batch: trust the record count in the header": [
+    "src/write_batch.cpp",
+    "  if (found != WriteBatchInternal::count(*this)) {\n    return Status::corruption(\"write batch: record count does not match header\");\n  }",
+    "  (void)found;"
+  ]
+}

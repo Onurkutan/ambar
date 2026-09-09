@@ -1,0 +1,27 @@
+{
+  "hash: return the raw state instead of the finalized high half": [
+    "src/hash.hpp",
+    "  return static_cast<uint32_t>(fmix64(h) >> 32);",
+    "  return static_cast<uint32_t>(h >> 32);"
+  ],
+  "hash: drop the per-word shift-xor": [
+    "src/hash.hpp",
+    "    h *= kPrime;\n    h ^= h >> 29;",
+    "    h *= kPrime;"
+  ],
+  "hash: drop the length from the seed": [
+    "src/hash.hpp",
+    "  uint64_t h = kPrime ^ (static_cast<uint64_t>(key.size()) * 0xff51afd7ed558ccdull);",
+    "  uint64_t h = kPrime;"
+  ],
+  "filter: treat an unreadable filter as 'absent' instead of 'may match'": [
+    "src/bloom.cpp",
+    "    if (len < 2) return true;",
+    "    if (len < 2) return false;"
+  ],
+  "filter: ignore bits_per_key and always use 8": [
+    "src/bloom.cpp",
+    "    size_t bits = keys.size() * static_cast<size_t>(bits_per_key_);",
+    "    size_t bits = keys.size() * 8;"
+  ]
+}

@@ -1,0 +1,20 @@
+build/
+build-*/
+cmake-build-*/
+*.o
+*.a
+compile_commands.json
+.cache/
+.idea/
+.vscode/
+
+# A database directory left in the repo root by running a tool (ambar_bench,
+# ambar_crash_test) with a relative path instead of a temp one.
+CURRENT
+LOCK
+LOG
+MANIFEST-*
+*.sst
+*.log
+*.dbtmp
+*.jnl

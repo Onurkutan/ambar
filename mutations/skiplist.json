@@ -1,0 +1,19 @@
+{
+  "_comment": "Concurrency faults. Run against a ThreadSanitizer build: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DAMBAR_SANITIZE=thread, then apply one of these by hand and run ./build-tsan/ambar_tests -v. tools/mutate.py drives ./build, so point it at a TSan build directory or apply these manually.",
+
+  "skiplist: publish a node with a relaxed store": [
+    "src/skiplist.hpp",
+    "next_[level].store(node, std::memory_order_release);",
+    "next_[level].store(node, std::memory_order_relaxed);"
+  ],
+  "skiplist: read a node with a relaxed load": [
+    "src/skiplist.hpp",
+    "return next_[level].load(std::memory_order_acquire);",
+    "return next_[level].load(std::memory_order_relaxed);"
+  ],
+  "iterator teardown: release the version without the database lock": [
+    "src/db_impl.cpp",
+    "      std::lock_guard<std::mutex> lock(*mutex_);\n      mem_->unref();",
+    "      mem_->unref();"
+  ]
+}
