@@ -125,7 +125,7 @@ options removed, the missing test written, the fault-injection harness added to
     cmake --build build
     ./build/ambar_tests
 
-169 tests, no external framework. Also:
+170 tests, no external framework. Also:
 
     cmake -S . -B build-asan -DAMBAR_SANITIZE=address   # ASan + UBSan
     cmake -S . -B build-tsan -DAMBAR_SANITIZE=thread    # ThreadSanitizer
@@ -161,6 +161,21 @@ still holds everything it acknowledged. A crash test lands somewhere random;
 this visits the rare instant deliberately.
 
     ./tools/fault_sweep.sh build 3
+
+**Fuzzing.** The corruption suite damages files in ways somebody thought of.
+This hands each parser of untrusted bytes — table, block, filter block, log,
+write batch, manifest — inputs nobody thought of, under ASan and UBSan,
+starting from a valid example of each format that the engine's own writers
+produce. Needs clang, which is where libFuzzer lives.
+
+    CC=clang CXX=clang++ cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DAMBAR_FUZZ=ON
+    cmake --build build-fuzz --target fuzzers
+    ./build-fuzz/fuzz_seeds corpus
+    ./build-fuzz/fuzz_table -max_len=16384 corpus/table
+
+CI runs every target for a minute on each push as a smoke test; a real
+campaign is the same command left running. An input that crashes a parser is
+written to the working directory and is, on its own, the whole bug report.
 
 **Benchmarks**, against SQLite where it is available:
 

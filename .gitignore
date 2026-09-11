@@ -18,3 +18,12 @@ MANIFEST-*
 *.log
 *.dbtmp
 *.jnl
+
+# What a fuzz run leaves behind: the seed corpora fuzz_seeds writes, and the
+# inputs libFuzzer saves when one of them crashes, hangs or leaks.
+corpus/
+crashes/
+crash-*
+leak-*
+timeout-*
+oom-*

@@ -126,3 +126,52 @@ jobs:
       # every point in a workload where it would matter.
       - name: Fail one fsync at a time across every manifest write
         run: ./tools/fault_sweep.sh build 2
+
+  # Everything above feeds the engine files it wrote itself, or files damaged
+  # by hand in ways somebody thought of.  This feeds each parser of untrusted
+  # bytes -- table, block, filter, log, batch, manifest -- inputs nobody thought
+  # of, under ASan and UBSan, starting from a valid example of each format.
+  #
+  # A minute per target is a smoke test, not a campaign: it catches the
+  # shallow bugs and any regression in the deep ones a longer local run found.
+  fuzz:
+    name: fuzz / libFuzzer smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
+        env:
+          CC: clang
+          CXX: clang++
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DAMBAR_FUZZ=ON
+          -DCMAKE_CXX_FLAGS=-Werror
+      - run: cmake --build build --target fuzzers
+      - name: Seed every corpus from the engine's own writers
+        run: ./build/fuzz_seeds corpus
+      - name: Fuzz each parser for a minute
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          ASAN_OPTIONS: detect_leaks=1
+        run: |
+          mkdir -p crashes
+          for target in version_edit block filter_block write_batch table wal; do
+            echo "::group::fuzz_$target"
+            ./build/fuzz_$target \
+              -max_total_time=60 -max_len=16384 -timeout=20 \
+              -artifact_prefix="crashes/$target-" \
+              "corpus/$target"
+            echo "::endgroup::"
+          done
+      # A crash is only useful if somebody can reproduce it.  The input that
+      # caused it is the whole bug report.
+      - name: Keep any input that crashed a parser
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-crashes
+          path: crashes/
+          if-no-files-found: ignore

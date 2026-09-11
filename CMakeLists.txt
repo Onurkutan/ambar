@@ -15,6 +15,12 @@ endif()
 set(AMBAR_SANITIZE "off" CACHE STRING "off | address | thread")
 set_property(CACHE AMBAR_SANITIZE PROPERTY STRINGS off address thread)
 
+# The libFuzzer targets in fuzz/.  Off by default because they need clang --
+# libFuzzer ships with it and with nothing else -- and because they choose
+# their own sanitizers: every parser is fuzzed under ASan and UBSan, since a
+# fuzzer without them only finds the crashes that were going to be found anyway.
+option(AMBAR_FUZZ "Build the fuzz targets (clang only; implies address+undefined)" OFF)
+
 if(MSVC)
   # /EHsc: standard C++ exception unwinding, which the standard library headers
   # assume. Without it, MSVC treats every function as nothrow-by-default and
@@ -29,7 +35,21 @@ else()
   add_compile_options(-Wall -Wextra -Wpedantic -Wconversion -Wshadow)
 endif()
 
-if(NOT MSVC)
+if(AMBAR_FUZZ)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "AMBAR_FUZZ needs clang: libFuzzer is part of it")
+  endif()
+  if(NOT AMBAR_SANITIZE STREQUAL "off")
+    message(FATAL_ERROR "AMBAR_FUZZ selects its own sanitizers; leave AMBAR_SANITIZE off")
+  endif()
+  # fuzzer-no-link instruments everything for coverage without pulling in
+  # libFuzzer's main; only the fuzz executables link that, below.  -O1 keeps
+  # the assertions and most of the speed, which is the trade libFuzzer's own
+  # documentation recommends.
+  add_compile_options(-fsanitize=fuzzer-no-link,address,undefined
+                      -fno-omit-frame-pointer -g -O1)
+  add_link_options(-fsanitize=address,undefined)
+elseif(NOT MSVC)
   if(AMBAR_SANITIZE STREQUAL "address")
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
     add_link_options(-fsanitize=address,undefined)
@@ -115,4 +135,25 @@ if(NOT MSVC)
     target_compile_definitions(ambar_bench PRIVATE AMBAR_BENCH_SQLITE)
     target_link_libraries(ambar_bench PRIVATE SQLite::SQLite3)
   endif()
+endif()
+
+# Fuzzers.  One executable per parser of untrusted bytes, plus the tool that
+# writes their seed corpora.  `cmake --build build --target fuzzers` builds
+# exactly these and nothing else, which is what CI does.
+if(AMBAR_FUZZ)
+  add_custom_target(fuzzers)
+
+  foreach(name IN ITEMS version_edit block filter_block write_batch table wal)
+    add_executable(fuzz_${name} fuzz/fuzz_${name}.cpp)
+    target_link_libraries(fuzz_${name} PRIVATE ambar Threads::Threads)
+    target_include_directories(fuzz_${name} PRIVATE src)
+    # This is the one place libFuzzer's main comes in.
+    target_link_options(fuzz_${name} PRIVATE -fsanitize=fuzzer)
+    add_dependencies(fuzzers fuzz_${name})
+  endforeach()
+
+  add_executable(fuzz_seeds fuzz/make_seeds.cpp)
+  target_link_libraries(fuzz_seeds PRIVATE ambar Threads::Threads)
+  target_include_directories(fuzz_seeds PRIVATE src)
+  add_dependencies(fuzzers fuzz_seeds)
 endif()
