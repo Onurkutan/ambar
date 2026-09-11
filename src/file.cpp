@@ -15,6 +15,7 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <fcntl.h>
 #include <io.h>
 #else
 #include <fcntl.h>
@@ -28,15 +29,147 @@ std::string errno_message(const std::string& what, const std::string& path) {
   return what + " '" + path + "': " + std::strerror(errno);
 }
 
+#if defined(_WIN32)
+
+std::string win32_message(const char* what, const std::string& path,
+                          DWORD error) {
+  return std::string(what) + " '" + path + "': error " + std::to_string(error);
+}
+
+bool same_file(const BY_HANDLE_FILE_INFORMATION& a,
+               const BY_HANDLE_FILE_INFORMATION& b) {
+  return a.dwVolumeSerialNumber == b.dwVolumeSerialNumber &&
+         a.nFileIndexHigh == b.nFileIndexHigh &&
+         a.nFileIndexLow == b.nFileIndexLow;
+}
+
+// Opens `path` without following a symbolic link or junction placed there --
+// the property O_NOFOLLOW gives the POSIX branch of this file.
+//
+// FILE_FLAG_OPEN_REPARSE_POINT opens a reparse point *itself* rather than
+// whatever it resolves to, and the handle then says what it is.  Asking the
+// handle rather than the path leaves no window in which the file could be
+// swapped for a link between the check and the open.
+//
+// Not every reparse point is a link.  A OneDrive placeholder, a file
+// compressed with `compact /exe`, a deduplicated one: each carries the
+// attribute, none redirects anywhere, and each is unreadable through a handle
+// that bypassed its filter driver.  Those are reopened the ordinary way and
+// then shown to be the same file as the one just inspected.
+//
+// `create_error` receives the error from whichever CreateFile failed, or
+// zero, so a caller can tell a sharing violation from the rest.
+Status open_refusing_links(const std::string& path, DWORD desired_access,
+                           DWORD share, DWORD creation, const char* what,
+                           DWORD* create_error, HANDLE* out) {
+  *create_error = 0;
+  HANDLE handle = ::CreateFileA(
+      path.c_str(), desired_access, share, nullptr, creation,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (handle == INVALID_HANDLE_VALUE) {
+    *create_error = ::GetLastError();
+    return Status::io_error(win32_message(what, path, *create_error));
+  }
+
+  FILE_ATTRIBUTE_TAG_INFO tag;
+  if (!::GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &tag,
+                                      sizeof(tag))) {
+    const DWORD error = ::GetLastError();
+    ::CloseHandle(handle);
+    return Status::io_error(win32_message(what, path, error));
+  }
+  if ((tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+    *out = handle;  // a plain file, which is nearly always the case
+    return Status::ok();
+  }
+  if (IsReparseTagNameSurrogate(tag.ReparseTag)) {
+    ::CloseHandle(handle);
+    return Status::io_error(std::string(what) + " '" + path +
+                            "': it is a symbolic link or junction, which is "
+                            "refused rather than followed");
+  }
+
+  BY_HANDLE_FILE_INFORMATION inspected;
+  if (!::GetFileInformationByHandle(handle, &inspected)) {
+    const DWORD error = ::GetLastError();
+    ::CloseHandle(handle);
+    return Status::io_error(win32_message(what, path, error));
+  }
+  ::CloseHandle(handle);
+
+  handle = ::CreateFileA(path.c_str(), desired_access, share, nullptr,
+                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (handle == INVALID_HANDLE_VALUE) {
+    *create_error = ::GetLastError();
+    return Status::io_error(win32_message(what, path, *create_error));
+  }
+  BY_HANDLE_FILE_INFORMATION reopened;
+  if (!::GetFileInformationByHandle(handle, &reopened)) {
+    const DWORD error = ::GetLastError();
+    ::CloseHandle(handle);
+    return Status::io_error(win32_message(what, path, error));
+  }
+  if (!same_file(inspected, reopened)) {
+    ::CloseHandle(handle);
+    return Status::io_error(std::string(what) + " '" + path +
+                            "': the file changed underneath the open");
+  }
+  *out = handle;
+  return Status::ok();
+}
+
+// Hands an open handle to the C runtime as a FILE*, which WritableFile and
+// SequentialFile are built on.  The runtime owns the handle from here on:
+// fclose closes it.
+Status stream_from_handle(HANDLE handle, int crt_flags, const char* mode,
+                          const std::string& path, const char* what,
+                          std::FILE** out) {
+  const int fd = ::_open_osfhandle(reinterpret_cast<intptr_t>(handle),
+                                   crt_flags | _O_BINARY);
+  if (fd < 0) {
+    const std::string message = errno_message(what, path);
+    ::CloseHandle(handle);
+    return Status::io_error(message);
+  }
+  std::FILE* file = ::_fdopen(fd, mode);
+  if (file == nullptr) {
+    const std::string message = errno_message(what, path);
+    ::_close(fd);
+    return Status::io_error(message);
+  }
+  *out = file;
+  return Status::ok();
+}
+
+#endif
+
 }  // namespace
 
 // ---------------------------------------------------------- WritableFile ---
 Status WritableFile::open(const std::string& path, bool append,
                           std::unique_ptr<WritableFile>* out) {
 #if defined(_WIN32)
-  std::FILE* file = std::fopen(path.c_str(), append ? "ab" : "wb");
-  if (file == nullptr) {
-    return Status::io_error(errno_message("cannot open for writing", path));
+  // OPEN_ALWAYS rather than CREATE_ALWAYS: a link at the path has to be seen
+  // before anything is truncated, so a fresh file is truncated by hand once
+  // the handle is known to be a plain file.  The sharing mode is the one the
+  // C runtime's fopen used here before, so nothing else changes.
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  DWORD create_error = 0;
+  Status status = open_refusing_links(
+      path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_ALWAYS,
+      "cannot open for writing", &create_error, &handle);
+  if (!status.is_ok()) return status;
+
+  std::FILE* file = nullptr;
+  status = stream_from_handle(handle, append ? _O_APPEND : 0,
+                              append ? "ab" : "wb", path,
+                              "cannot open for writing", &file);
+  if (!status.is_ok()) return status;
+
+  if (!append && ::_chsize_s(::_fileno(file), 0) != 0) {
+    const std::string message = errno_message("cannot truncate", path);
+    std::fclose(file);
+    return Status::io_error(message);
   }
 #else
   // O_NOFOLLOW refuses to open a symlink at this exact path.  A database
@@ -129,10 +262,17 @@ Status WritableFile::close() {
 Status SequentialFile::open(const std::string& path,
                             std::unique_ptr<SequentialFile>* out) {
 #if defined(_WIN32)
-  std::FILE* file = std::fopen(path.c_str(), "rb");
-  if (file == nullptr) {
-    return Status::io_error(errno_message("cannot open for reading", path));
-  }
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  DWORD create_error = 0;
+  Status status = open_refusing_links(
+      path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING,
+      "cannot open for reading", &create_error, &handle);
+  if (!status.is_ok()) return status;
+
+  std::FILE* file = nullptr;
+  status = stream_from_handle(handle, _O_RDONLY, "rb", path,
+                              "cannot open for reading", &file);
+  if (!status.is_ok()) return status;
 #else
   // Same symlink refusal as WritableFile::open, for the read side: CURRENT,
   // a MANIFEST, and a log file are all opened by a predictable name inside a
@@ -205,14 +345,13 @@ class LocalRandomAccessFile final : public RandomAccessFile {
 
 Status open_impl(const std::string& path,
                  std::unique_ptr<RandomAccessFile>* out) {
-  const HANDLE handle =
-      ::CreateFileA(path.c_str(), GENERIC_READ,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (handle == INVALID_HANDLE_VALUE) {
-    return Status::io_error("cannot open for reading '" + path + "': error " +
-                            std::to_string(::GetLastError()));
-  }
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  DWORD create_error = 0;
+  const Status status = open_refusing_links(
+      path, GENERIC_READ,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, OPEN_EXISTING,
+      "cannot open for reading", &create_error, &handle);
+  if (!status.is_ok()) return status;
   out->reset(new LocalRandomAccessFile(handle, path));
   return Status::ok();
 }
@@ -326,18 +465,18 @@ Status FileLock::acquire(const std::string& path,
                          std::unique_ptr<FileLock>* out) {
   // No sharing at all: the second opener fails outright, which is the
   // behaviour wanted here.
-  const HANDLE handle =
-      ::CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE,
-                    /*dwShareMode=*/0, nullptr, OPEN_ALWAYS,
-                    FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (handle == INVALID_HANDLE_VALUE) {
-    const DWORD error = ::GetLastError();
-    if (error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION) {
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  DWORD create_error = 0;
+  const Status status = open_refusing_links(
+      path, GENERIC_READ | GENERIC_WRITE, /*share=*/0, OPEN_ALWAYS,
+      "cannot create the lock file", &create_error, &handle);
+  if (!status.is_ok()) {
+    if (create_error == ERROR_SHARING_VIOLATION ||
+        create_error == ERROR_LOCK_VIOLATION) {
       return Status::io_error("the database at '" + path +
                               "' is already open in another process");
     }
-    return Status::io_error("cannot create the lock file '" + path +
-                            "': error " + std::to_string(error));
+    return status;
   }
   out->reset(new FileLock(handle, path));
   return Status::ok();
