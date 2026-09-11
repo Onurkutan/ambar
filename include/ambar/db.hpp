@@ -94,6 +94,8 @@ class DB {
   //   ambar.stats                   files and bytes per level
   //   ambar.sstables                every file, with its key range
   //   ambar.approximate-memory-usage bytes held in memtables
+  //   ambar.last-sequence           the newest sequence number assigned, which
+  //                                 is what a snapshot taken now would see
   virtual bool get_property(std::string_view property, std::string* value) = 0;
 
   // Compacts the given range, or the whole database when both are null.  Used

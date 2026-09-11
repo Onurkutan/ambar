@@ -1426,6 +1426,11 @@ bool DBImpl::get_property(std::string_view property, std::string* value) {
     return true;
   }
 
+  if (name == "last-sequence") {
+    *value = std::to_string(versions_->last_sequence());
+    return true;
+  }
+
   return false;
 }
 

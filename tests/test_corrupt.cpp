@@ -36,6 +36,7 @@
 #include "../src/format.hpp"
 #include "../src/table.hpp"
 #include "../src/version_edit.hpp"
+#include "../src/wal.hpp"
 
 using namespace ambar;
 
@@ -457,6 +458,60 @@ TEST(corrupt, a_manifest_with_a_short_compaction_pointer_is_refused) {
 
   VersionEdit decoded;
   CHECK(decoded.decode_from(encoded).is_corruption());
+}
+
+// A log record that is a complete, empty batch: the twelve-byte header --
+// sequence 0, count 0 -- and nothing after it.  Legal, and cheap to forge.
+// Recovery used to compute the batch's last sequence as sequence + count - 1,
+// and count - 1 on a uint32_t of zero is 4294967295: the database opened,
+// replayed nothing, and then handed out sequence numbers from four billion.
+// Nothing a read could see went wrong, which is why it needs a test that asks
+// the engine directly.
+TEST(corrupt, an_empty_batch_in_the_log_does_not_skip_four_billion_sequences) {
+  TempDir dir;
+  const std::string path = dir.file("db");
+  {
+    Options options;
+    options.create_if_missing = true;
+    std::unique_ptr<DB> db;
+    CHECK_OK(DB::open(options, path, &db));
+  }
+
+  // The live log, which the next open replays.
+  std::string log_path;
+  for (const std::string& file : files_in(path)) {
+    uint64_t number = 0;
+    FileType type;
+    const std::string name = std::filesystem::path(file).filename().string();
+    if (parse_file_name(name, &number, &type) && type == FileType::kLog) {
+      log_path = file;
+    }
+  }
+  CHECK(!log_path.empty());
+  if (log_path.empty()) return;
+
+  {
+    std::unique_ptr<WritableFile> file;
+    CHECK_OK(WritableFile::open(log_path, /*append=*/false, &file));
+    LogWriter writer(std::move(file));
+    CHECK_OK(writer.add_record(std::string(12, '\0')));
+    CHECK_OK(writer.sync());
+    CHECK_OK(writer.close());
+  }
+
+  Options options;
+  options.create_if_missing = false;
+  std::unique_ptr<DB> db;
+  CHECK_OK(DB::open(options, path, &db));
+
+  std::string sequence;
+  CHECK(db->get_property("ambar.last-sequence", &sequence));
+  CHECK_EQ(sequence, std::string("0"));
+
+  // And the numbering carries on from there, not from four billion.
+  CHECK_OK(db->put(WriteOptions(), "k", "v"));
+  CHECK(db->get_property("ambar.last-sequence", &sequence));
+  CHECK_EQ(sequence, std::string("1"));
 }
 
 // A file name whose number does not fit in 64 bits must not wrap around into a
