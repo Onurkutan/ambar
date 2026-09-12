@@ -27,6 +27,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "ambar/iterator.hpp"
 #include "ambar/options.hpp"
@@ -114,6 +115,57 @@ class DB {
 // thing the lock exists to prevent, and it would be absurd for the destroy
 // path to be the hole in it.
 Status destroy_db(const std::string& name, const Options& options);
+
+// What repair_db found, and what it did about it.
+struct RepairReport {
+  int tables_kept = 0;       // table files that opened and read to their end
+  int tables_set_aside = 0;  // moved to <name>/lost/: would not open or read
+  int logs_converted = 0;    // log files replayed, as recovery would have
+  int logs_set_aside = 0;    // of those, ones that stopped early: replayed as
+                             // far as they went, then moved to <name>/lost/
+  int tables_written = 0;    // the merged tables the new manifest names
+  uint64_t last_sequence = 0;
+  bool opened = false;       // the repaired database was opened and closed
+  std::vector<std::string> notes;  // one line per file, and per surprise
+};
+
+// Rebuilds a database from the files that survive in its directory, so that
+// one open() refuses -- CURRENT lost, a manifest damaged in the middle, a
+// table the manifest names that is not there -- can be opened again.
+//
+// Every table that opens and reads to its end, in order, is kept; every log
+// is replayed as far as it can be read, each batch checked before it is
+// applied; what will not read is moved to <name>/lost/ rather than deleted,
+// and so are the old manifests and CURRENT, which are the record of what
+// went wrong.  What was kept is merged -- each user key once, at its newest
+// version, deletions dropped, in tables that do not overlap -- read back,
+// and named by a fresh manifest at the last level, where nothing lies
+// beneath them and nothing schedules a compaction over them.  Finally the
+// database is opened, which is what says the repair worked, and whose
+// cleanup removes the files the merge replaced.  The report says what was
+// kept, what was set aside, and why.
+//
+// What it cannot restore is the history that produced the files.  Two
+// consequences, both rare, both stated because the report is read under
+// pressure:
+//
+//   * A tombstone that a compaction already dropped no longer shadows an
+//     older value that survives in a stale input file -- one that cleanup
+//     had not yet removed when the manifest was lost.  That key comes back.
+//   * A table set aside takes its deletions with it as well as its values,
+//     so a key it deleted may reappear from an older table.
+//
+// Takes the lock open() takes, with the same limit: it keeps out another
+// process, and on POSIX not a second caller in this one.  A repair that
+// fails before the manifest is written leaves the directory as it found it,
+// apart from lost/; one that fails at the final open has already pointed
+// CURRENT at the merged tables and left every other file in place, and
+// says so.  Running it again reads the survivors and any merged tables
+// alike, and the merge collapses the overlap.  Not for a database that
+// opens: repair rewrites every table, and an intact database gains nothing
+// from that.
+Status repair_db(const std::string& name, const Options& options,
+                 RepairReport* report);
 
 }  // namespace ambar
 

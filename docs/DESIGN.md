@@ -419,6 +419,73 @@ can also choose when to interrupt it, and a file that passes every check can
 still contain wrong data. The checksum tells you a block is the block that was
 written; nothing tells you the block was right when it was written.
 
+## Repair
+
+A manifest is a log of edits that, replayed, says which table sits at which
+level covering which keys. Everything it says can also be found out the slow
+way: a table carries its own keys, so its range and its newest sequence number
+are a matter of reading it. `repair_db` -- `ambar_repair <dir>` -- does that
+for a database `open()` refuses: `CURRENT` lost, a manifest damaged in the
+middle, a table the manifest names that is not there.
+
+It takes the lock, reads every table from beginning to end, and keeps each one
+that reads back in order. It replays every log into tables the way recovery
+would, as far as each can be read, checking each batch -- that it parses, that
+its sequence numbers follow the last batch's and fit -- before applying it.
+Then it merges what it kept: every user key once, at its newest version, in
+order, into tables that do not overlap, in rounds of at most 256 inputs so
+that a large database does not need more open files than a process is
+allowed. It reads the merged tables back, writes a fresh manifest naming them,
+and finally opens the database, which is what says the repair worked. Nothing
+is deleted by repair itself: a file that would not read is moved to
+`<dir>/lost/`, the old manifests and `CURRENT` are moved there too as the
+record of what went wrong, and the files the merge replaced are left for that
+last open's cleanup, which removes only what the new manifest does not name.
+A log that stopped early -- a torn tail, or damage -- is replayed to the stop
+and then moved to `lost/`, with a note that says whether intact records
+followed the stop, so the bytes past it are still there for a person.
+
+Merging is the part that matters, and the first draft did not do it. The
+obvious repair names the surviving tables in a manifest at level 0 and lets
+compaction sort them out. Level 0 is where files may overlap, and a lookup
+there resolves overlap by file number, newest first -- which stands in for age
+only among files that were all flushed from memtables. A compaction output
+carries a newer number than a flush that came before it and older versions of
+the same keys, so after that repair `get()` answered with the overwritten
+value while a scan over the same files answered correctly. The survivors can
+also hold the same entry twice, a compaction output beside the input it was
+made from, which the engine's own merge is entitled to assume never happens.
+A merge in repair that tolerates both -- equal keys collapse, the first version
+of a user key is the newest one -- is a few dozen lines; the alternative was a
+precondition weakened everywhere.
+
+The merged tables go to the last level. Nothing lies beneath it, so a
+deletion whose version is the newest can be dropped rather than carried; and
+the last level is never scored for compaction, so the first open after a
+repair does not set off a rewrite of everything repair just wrote. New
+writes land at level 0 as always and are pushed down as always.
+
+What repair cannot restore is the history that produced the files, and two
+things follow from that, both rare:
+
+* **A dropped tombstone.** A compaction at the bottom level drops a tombstone
+  once nothing older can exist. If a stale input from before that compaction
+  survived -- the manifest went before the cleanup did -- repair keeps it, and
+  the value it holds for that key is no longer shadowed. The key comes back.
+* **A set-aside table's deletions.** A table that would not read takes its
+  tombstones with it as well as its values, so a key it deleted may reappear
+  from an older table.
+
+The sequence number matters more than either. Recovery numbers new writes from
+the manifest's `last_sequence`, and a write numbered below an entry that
+already exists loses to it in every merge; so repair reads every entry of
+every table rather than trusting anything, refuses a log whose batch headers
+claim a sequence that does not follow or does not fit, and
+`tests/test_repair.cpp` checks that a write made after a repair reads back --
+and, with two tables built by hand so that the lower-numbered one holds the
+newer versions, that repair takes the newest version of a key regardless of
+which file it sits in.
+
 ## What the tests are for
 
 * `tests/` — unit tests per component, plus model-based tests that drive the
@@ -454,15 +521,6 @@ to discover.
 * **Compression.** The block trailer reserves a type byte and the reader
   refuses a type it cannot handle, so adding it later does not change the
   format for existing files. Nothing compresses today.
-* **A repair tool.** A database whose manifest is lost cannot currently be
-  rebuilt from the table files that survive, though the information to do it is
-  present in them. This matters more than it would in an engine that never
-  refuses to open: recovery reports corruption when the manifest names a table
-  that is missing, and there is nothing to run afterwards. What the engine does
-  guarantee is that it will not make things worse: a directory that holds
-  tables or logs but no `CURRENT` is refused, even with `create_if_missing`,
-  rather than treated as empty and created over -- which would have let the
-  cleanup after the open delete every table the new manifest did not name.
 * **Parallel compaction.** One background thread. Compaction is IO bound and
   its inputs and outputs are ordered with respect to each other, so a second
   thread would mostly contend for the same lock; doing it properly needs

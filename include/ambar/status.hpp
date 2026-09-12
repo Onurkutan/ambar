@@ -47,6 +47,9 @@ class Status {
   bool is_not_found() const { return code_ == Code::kNotFound; }
   bool is_corruption() const { return code_ == Code::kCorruption; }
   bool is_io_error() const { return code_ == Code::kIoError; }
+  bool is_invalid_argument() const {
+    return code_ == Code::kInvalidArgument;
+  }
 
   Code code() const { return code_; }
   const std::string& message() const { return message_; }

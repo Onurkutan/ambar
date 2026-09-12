@@ -41,6 +41,10 @@ ambar::Status status = db->get(ambar::ReadOptions(), "key", &value);
   has open is refused rather than allowed to destroy both copies.
 * **Damaged files produce errors, not crashes.** Every table file is treated as
   untrusted input.
+* **Repair.** A database whose manifest is lost or damaged is refused rather
+  than guessed at, and `ambar_repair` rebuilds it from the table and log files
+  that survive -- keeping what reads back, setting aside what does not, merging
+  what it kept, and opening the result to prove it.
 
 ## What was found while building it
 
@@ -147,7 +151,7 @@ options removed, the missing test written, the fault-injection harness added to
     cmake --build build
     ./build/ambar_tests
 
-180 tests, no external framework. Also:
+189 tests, no external framework. Also:
 
     cmake -S . -B build-asan -DAMBAR_SANITIZE=address   # ASan + UBSan
     cmake -S . -B build-tsan -DAMBAR_SANITIZE=thread    # ThreadSanitizer
@@ -216,10 +220,11 @@ See `docs/BENCHMARKS.md` for the numbers and what they do and do not show.
 ## Limitations
 
 Stated so that the absence is a decision rather than something a reader has to
-discover: no compression (the format reserves the field), no repair tool (a
-database that has lost its manifest is refused rather than rebuilt — or, since
-this release, created over), one compaction thread, no column families or
-transactions. `docs/DESIGN.md` says why for each.
+discover: no compression (the format reserves the field), one compaction
+thread, no column families or transactions. `docs/DESIGN.md` says why for
+each. Repair rebuilds a database but not the history behind it: a key deleted
+before the damage can come back if a stale pre-compaction file survived, and
+`docs/DESIGN.md` says exactly when.
 
 The `sync=true` durability guarantee rests on the `fsync` calls being correct
 by inspection, not by test: `SIGKILL` leaves everything the kernel has, so a
