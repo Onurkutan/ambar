@@ -1,0 +1,9 @@
+{
+  "_comment": "Faults in the open path. Each is caught by the unit suite, so tools/mutate.py runs them directly.",
+
+  "open: create a new database over one that has lost CURRENT": [
+    "src/db_impl.cpp",
+    "    if (data_files > 0) {",
+    "    if (data_files < 0) {"
+  ]
+}

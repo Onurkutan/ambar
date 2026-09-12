@@ -7,6 +7,7 @@ pass; it does not say they would notice a bug, and those are different claims.
     python3 tools/mutate.py mutations/merger.json
     python3 tools/mutate.py mutations/bloom.json
     python3 tools/mutate.py mutations/write_batch.json
+    python3 tools/mutate.py mutations/recovery.json
 
 Each mutation is applied to the source, the project is rebuilt, the unit suite
 is run, and the script reports which tests noticed. The original file is

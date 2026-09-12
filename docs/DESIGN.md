@@ -434,7 +434,11 @@ to discover.
   rebuilt from the table files that survive, though the information to do it is
   present in them. This matters more than it would in an engine that never
   refuses to open: recovery reports corruption when the manifest names a table
-  that is missing, and there is nothing to run afterwards.
+  that is missing, and there is nothing to run afterwards. What the engine does
+  guarantee is that it will not make things worse: a directory that holds
+  tables or logs but no `CURRENT` is refused, even with `create_if_missing`,
+  rather than treated as empty and created over -- which would have let the
+  cleanup after the open delete every table the new manifest did not name.
 * **Parallel compaction.** One background thread. Compaction is IO bound and
   its inputs and outputs are ordered with respect to each other, so a second
   thread would mostly contend for the same lock; doing it properly needs

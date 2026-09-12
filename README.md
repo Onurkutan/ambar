@@ -104,6 +104,16 @@ manifest referenced tables that no longer existed. Sweeping every manifest
 `fsync` in a workload, 17 of 85 injection points produced a database that would
 never open again with all of its data still on disk.
 
+**Losing a sixteen-byte file lost the database.** `CURRENT` names the manifest, and
+a crash on a filesystem that does not make the rename durable can leave it
+missing. With `create_if_missing` set — as the quick-start above sets it — the
+open path saw an empty directory, created a fresh database, and then ran the
+cleanup that follows every successful open, which deletes each table the
+manifest does not name. The fresh manifest named none of them. Found by reading
+the open path rather than by any test, because every corruption test opened
+with `create_if_missing` off; the test that pins it now opens the other way and
+counts the tables before and after.
+
 **And several claims that were simply wrong.** The design document said, as
 such documents usually do, that the log record must precede the memtable insert
 or a value becomes readable before it is durable. Swapping the two and running
@@ -125,7 +135,7 @@ options removed, the missing test written, the fault-injection harness added to
     cmake --build build
     ./build/ambar_tests
 
-171 tests, no external framework. Also:
+173 tests, no external framework. Also:
 
     cmake -S . -B build-asan -DAMBAR_SANITIZE=address   # ASan + UBSan
     cmake -S . -B build-tsan -DAMBAR_SANITIZE=thread    # ThreadSanitizer
@@ -194,9 +204,10 @@ See `docs/BENCHMARKS.md` for the numbers and what they do and do not show.
 ## Limitations
 
 Stated so that the absence is a decision rather than something a reader has to
-discover: no compression (the format reserves the field), no repair tool, one
-compaction thread, no column families or transactions. `docs/DESIGN.md` says
-why for each.
+discover: no compression (the format reserves the field), no repair tool (a
+database that has lost its manifest is refused rather than rebuilt — or, since
+this release, created over), one compaction thread, no column families or
+transactions. `docs/DESIGN.md` says why for each.
 
 The `sync=true` durability guarantee rests on the `fsync` calls being correct
 by inspection, not by test: `SIGKILL` leaves everything the kernel has, so a

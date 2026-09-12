@@ -27,3 +27,7 @@ crash-*
 leak-*
 timeout-*
 oom-*
+
+# Python bytecode from running tools/mutate.py
+__pycache__/
+*.pyc

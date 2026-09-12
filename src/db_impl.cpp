@@ -51,6 +51,21 @@ Options sanitize_options(const std::string& dbname, const Options& source,
   return result;
 }
 
+// How many table and log files a directory holds: the files that carry data,
+// as opposed to the manifest, lock and info log that only describe it.
+int count_data_files(const std::string& dbname) {
+  int count = 0;
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::directory_iterator(dbname, ec)) {
+    uint64_t number = 0;
+    FileType type;
+    const std::string name = entry.path().filename().string();
+    if (!parse_file_name(name, &number, &type)) continue;
+    if (type == FileType::kTable || type == FileType::kLog) ++count;
+  }
+  return count;
+}
+
 }  // namespace
 
 // One caller's pending write, and the machinery for handing the work to
@@ -182,6 +197,27 @@ Status DBImpl::recover(VersionEdit* edit, bool* save_manifest) {
       return Status::invalid_argument(
           "database does not exist in '" + dbname_ +
           "' and create_if_missing is false");
+    }
+    // No CURRENT, but tables or logs: not an empty directory but a database
+    // that has lost the one file naming its manifest -- a crash on a
+    // filesystem that did not make the rename durable, a copy that missed a
+    // file.  Creating a fresh database here would be the last thing that
+    // ever happened to the data, because the cleanup that follows a
+    // successful open deletes every table the new manifest does not name,
+    // which is all of them.  So it is refused.
+    //
+    // A manifest with nothing pointing at it and no data beside it is a
+    // different shape: what new_db leaves when it dies before writing
+    // CURRENT.  That directory is still empty in every way that matters, and
+    // is still created over.
+    const int data_files = count_data_files(dbname_);
+    if (data_files > 0) {
+      return Status::corruption(
+          "'" + dbname_ + "' has no CURRENT file but holds " +
+          std::to_string(data_files) +
+          " table or log file(s): this is a database whose CURRENT was lost, "
+          "not an empty directory, and creating a new database over it would "
+          "delete them.  To start over, remove the directory.");
     }
     status = new_db();
     if (!status.is_ok()) return status;

@@ -252,6 +252,73 @@ TEST(corrupt, a_missing_table_file_is_reported_rather_than_ignored) {
   CHECK(status.is_corruption());
 }
 
+// A database that has lost CURRENT -- the one file that names its manifest --
+// opened with create_if_missing, which is what the quick-start in the README
+// sets.  Without a CURRENT the open path used to see an empty directory and
+// create a fresh database, and the cleanup that runs after a successful open
+// then deleted every table the fresh manifest did not name: all of them.
+// Losing a sixteen-byte file lost the database.
+TEST(corrupt, a_lost_current_is_refused_rather_than_created_over) {
+  TempDir dir;
+  const std::string path = dir.file("db");
+  build_database(path);
+
+  std::vector<std::string> tables;
+  for (const std::string& file : files_in(path)) {
+    if (file.size() > 4 && file.substr(file.size() - 4) == ".sst") {
+      tables.push_back(file);
+    }
+  }
+  CHECK(!tables.empty());
+  CHECK_OK(remove_file(current_file_name(path)));
+
+  Options options;
+  options.create_if_missing = true;
+  std::unique_ptr<DB> db;
+  const Status status = DB::open(options, path, &db);
+  CHECK(status.is_corruption());
+
+  // Refused before anything was written, and nothing was deleted.
+  CHECK(!file_exists(current_file_name(path)));
+  for (const std::string& table : tables) {
+    CHECK(file_exists(table));
+  }
+}
+
+// The shape the refusal above must not catch: a manifest with nothing pointing
+// at it and no data beside it, which is what new_db leaves when the process
+// dies between writing the manifest and writing CURRENT.  That directory has
+// never held a key, and is still created over.
+TEST(corrupt, a_manifest_nobody_points_at_is_still_an_empty_directory) {
+  TempDir dir;
+  const std::string path = dir.file("db");
+  {
+    Options options;
+    options.create_if_missing = true;
+    std::unique_ptr<DB> db;
+    CHECK_OK(DB::open(options, path, &db));
+  }
+  CHECK_OK(remove_file(current_file_name(path)));
+  for (const std::string& file : files_in(path)) {
+    uint64_t number = 0;
+    FileType type;
+    const std::string name = std::filesystem::path(file).filename().string();
+    if (parse_file_name(name, &number, &type) &&
+        (type == FileType::kLog || type == FileType::kTable)) {
+      CHECK_OK(remove_file(file));
+    }
+  }
+
+  Options options;
+  options.create_if_missing = true;
+  std::unique_ptr<DB> db;
+  CHECK_OK(DB::open(options, path, &db));
+  CHECK_OK(db->put(WriteOptions(), "k", "v"));
+  std::string value;
+  CHECK_OK(db->get(ReadOptions(), "k", &value));
+  CHECK_EQ(value, std::string("v"));
+}
+
 // ------------------------------------------------- hostile block contents ---
 //
 // The tests above damage files that this engine wrote.  These ones build the

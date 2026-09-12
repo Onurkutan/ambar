@@ -83,7 +83,10 @@ def main():
     mutations = json.loads(pathlib.Path(sys.argv[1]).read_text())
     originals = {}
     try:
-        for name, (relative, find, replace) in mutations.items():
+        for name, mutation in mutations.items():
+            if name.startswith("_"):
+                continue  # "_comment" and the like: notes, not mutations
+            relative, find, replace = mutation
             path = REPO / relative
             if path not in originals:
                 originals[path] = path.read_text()
