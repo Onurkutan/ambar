@@ -69,6 +69,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     (void)batch.iterate(&discard);
   }
   (void)reader.truncated();
+  (void)reader.damaged();
   (void)reader.failure_reason();
   return 0;
 }

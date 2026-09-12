@@ -104,8 +104,8 @@ manifest referenced tables that no longer existed. Sweeping every manifest
 `fsync` in a workload, 17 of 85 injection points produced a database that would
 never open again with all of its data still on disk.
 
-**Losing a sixteen-byte file lost the database.** `CURRENT` names the manifest, and
-a crash on a filesystem that does not make the rename durable can leave it
+**Losing a sixteen-byte file lost the database.** `CURRENT` names the manifest,
+and a crash on a filesystem that does not make the rename durable can leave it
 missing. With `create_if_missing` set — as the quick-start above sets it — the
 open path saw an empty directory, created a fresh database, and then ran the
 cleanup that follows every successful open, which deletes each table the
@@ -113,6 +113,18 @@ manifest does not name. The fresh manifest named none of them. Found by reading
 the open path rather than by any test, because every corruption test opened
 with `create_if_missing` off; the test that pins it now opens the other way and
 counts the tables before and after.
+
+**One flipped bit in the manifest rolled the database back, then deleted what
+it rolled back past.** The log reader stopped at any checksum failure and
+called it a torn tail, and recovery treated a torn tail as harmless — correctly
+for a tail, where nothing after the damage was ever written. A bit flipped in
+the *middle* of the manifest left every later edit intact on disk, unread. Open
+succeeded on the older state, cleanup deleted every table the unread edits
+named, and because new edits are appended after the damage, the next open did
+it again. The corruption suite had opened 132 damaged copies and accepted every
+status, including the successful ones; it never asked what the successful ones
+had done. The reader now looks past a failure for a record it can verify, and a
+manifest or log that has one is refused with its files intact.
 
 **And several claims that were simply wrong.** The design document said, as
 such documents usually do, that the log record must precede the memtable insert
@@ -135,7 +147,7 @@ options removed, the missing test written, the fault-injection harness added to
     cmake --build build
     ./build/ambar_tests
 
-173 tests, no external framework. Also:
+180 tests, no external framework. Also:
 
     cmake -S . -B build-asan -DAMBAR_SANITIZE=address   # ASan + UBSan
     cmake -S . -B build-tsan -DAMBAR_SANITIZE=thread    # ThreadSanitizer

@@ -319,6 +319,190 @@ TEST(corrupt, a_manifest_nobody_points_at_is_still_an_empty_directory) {
   CHECK_EQ(value, std::string("v"));
 }
 
+namespace {
+
+// Where the payload of the second record in a log-format file begins: past
+// the first record's header and payload, and past the second's header.
+size_t second_record_payload_offset(const std::string& bytes) {
+  const size_t first_length = static_cast<size_t>(
+      static_cast<unsigned char>(bytes[4]) |
+      (static_cast<unsigned char>(bytes[5]) << 8));
+  return kHeaderSize + first_length + kHeaderSize;
+}
+
+std::vector<std::string> table_files_in(const std::string& path) {
+  std::vector<std::string> out;
+  for (const std::string& file : files_in(path)) {
+    if (file.size() > 4 && file.substr(file.size() - 4) == ".sst") {
+      out.push_back(file);
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
+// A flipped bit in the middle of the manifest.  The reader used to stop there
+// and call it a torn tail, and recovery treated a torn tail as harmless: the
+// edits after it never became durable, so nothing they name can exist.  For a
+// tail that is true.  For a bit in the middle, every edit after it is intact
+// on disk, the tables they name are on disk, and the version rebuilt from the
+// records before the damage does not know about any of them -- so the open
+// succeeded, on an older state of the database, and the cleanup that follows
+// every open deleted the tables that state did not name.  Then, because new
+// edits are appended after the damage, the next open did it all again.
+TEST(corrupt, damage_in_the_middle_of_the_manifest_is_refused_not_rolled_back) {
+  TempDir dir;
+  const std::string path = dir.file("db");
+  build_database(path);
+
+  const std::vector<std::string> tables = table_files_in(path);
+  CHECK(!tables.empty());
+
+  std::string current = read_file(current_file_name(path));
+  while (!current.empty() && current.back() == '\n') current.pop_back();
+  const std::string manifest = path + "/" + current;
+
+  std::string bytes = read_file(manifest);
+  const size_t offset = second_record_payload_offset(bytes) + 1;
+  CHECK(offset + 64 < bytes.size());  // the damage is nowhere near the tail
+  bytes[offset] = static_cast<char>(bytes[offset] ^ 0x40);
+  write_file(manifest, bytes);
+
+  Options options;
+  options.create_if_missing = false;
+  std::unique_ptr<DB> db;
+  const Status status = DB::open(options, path, &db);
+  CHECK(status.is_corruption());
+
+  // Every table is exactly where it was, for a repair to find.
+  for (const std::string& table : tables) {
+    CHECK(file_exists(table));
+  }
+}
+
+// A torn tail on the manifest -- the record being written when the process
+// died -- is tolerated: everything before it is a state the database was in.
+// What must not happen next is appending to that file.  The reader stops at
+// the torn record every time, so an edit written after it is unreadable at the
+// next open, and once intact records follow the tear it reads as damage and
+// is refused.  Recovery writes a fresh manifest instead and leaves the torn
+// one to be cleaned up.
+TEST(corrupt, a_torn_manifest_tail_is_tolerated_and_the_file_is_not_reused) {
+  TempDir dir;
+  const std::string path = dir.file("db");
+  build_database(path);
+
+  std::string before = read_file(current_file_name(path));
+  while (!before.empty() && before.back() == '\n') before.pop_back();
+  const std::string torn_manifest = path + "/" + before;
+
+  // A header announcing two hundred bytes, followed by twenty of them.
+  std::string torn(kHeaderSize, '\0');
+  torn[4] = static_cast<char>(200);
+  torn[6] = static_cast<char>(RecordType::kFull);
+  torn.append(20, 'x');
+  write_file(torn_manifest, read_file(torn_manifest) + torn);
+
+  Options options;
+  options.create_if_missing = false;
+  {
+    std::unique_ptr<DB> db;
+    CHECK_OK(DB::open(options, path, &db));
+    std::string value;
+    CHECK_OK(db->get(ReadOptions(), "key_000000", &value));
+    CHECK_EQ(value, std::string(80, 'a'));
+  }
+
+  // CURRENT names a new manifest now, and the torn one is gone.
+  std::string after = read_file(current_file_name(path));
+  while (!after.empty() && after.back() == '\n') after.pop_back();
+  CHECK(after != before);
+  CHECK(!file_exists(torn_manifest));
+
+  // And the database written that way opens again, whole.
+  {
+    std::unique_ptr<DB> db;
+    CHECK_OK(DB::open(options, path, &db));
+    std::string value;
+    CHECK_OK(db->get(ReadOptions(), "key_003999", &value));
+    CHECK_EQ(value, std::string(80, 'v'));
+  }
+}
+
+// The same distinction for the write-ahead log, seen from the outside: a bit
+// flipped in a record with intact records after it is refused, because the
+// batches after it were acknowledged and replaying up to the hole would drop
+// them; a bit flipped in the last record is a torn tail, costs that record,
+// and opens.
+TEST(corrupt, damage_in_the_middle_of_the_log_is_refused_and_at_its_tail_is_not) {
+  auto build = [](const std::string& path) {
+    Options options;
+    options.create_if_missing = true;
+    std::unique_ptr<DB> db;
+    CHECK_OK(DB::open(options, path, &db));
+    WriteOptions durable;
+    durable.sync = true;
+    CHECK_OK(db->put(durable, "one", "1"));
+    CHECK_OK(db->put(durable, "two", "2"));
+    CHECK_OK(db->put(durable, "three", "3"));
+  };
+  auto log_of = [](const std::string& path) {
+    for (const std::string& file : files_in(path)) {
+      uint64_t number = 0;
+      FileType type;
+      const std::string name = std::filesystem::path(file).filename().string();
+      if (parse_file_name(name, &number, &type) && type == FileType::kLog) {
+        return file;
+      }
+    }
+    return std::string();
+  };
+
+  // In the middle: refused.
+  {
+    TempDir dir;
+    const std::string path = dir.file("db");
+    build(path);
+    const std::string log_path = log_of(path);
+    CHECK(!log_path.empty());
+
+    std::string bytes = read_file(log_path);
+    const size_t offset = second_record_payload_offset(bytes) + 1;
+    bytes[offset] = static_cast<char>(bytes[offset] ^ 0x40);
+    write_file(log_path, bytes);
+
+    Options options;
+    options.create_if_missing = false;
+    std::unique_ptr<DB> db;
+    CHECK(DB::open(options, path, &db).is_corruption());
+  }
+
+  // At the tail: a torn record, and the prefix before it.
+  {
+    TempDir dir;
+    const std::string path = dir.file("db");
+    build(path);
+    const std::string log_path = log_of(path);
+    CHECK(!log_path.empty());
+
+    std::string bytes = read_file(log_path);
+    bytes[bytes.size() - 1] = static_cast<char>(bytes[bytes.size() - 1] ^ 0x40);
+    write_file(log_path, bytes);
+
+    Options options;
+    options.create_if_missing = false;
+    std::unique_ptr<DB> db;
+    CHECK_OK(DB::open(options, path, &db));
+    std::string value;
+    CHECK_OK(db->get(ReadOptions(), "one", &value));
+    CHECK_EQ(value, std::string("1"));
+    CHECK_OK(db->get(ReadOptions(), "two", &value));
+    CHECK_EQ(value, std::string("2"));
+    CHECK(db->get(ReadOptions(), "three", &value).is_not_found());
+  }
+}
+
 // ------------------------------------------------- hostile block contents ---
 //
 // The tests above damage files that this engine wrote.  These ones build the

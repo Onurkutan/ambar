@@ -83,9 +83,10 @@ class LogReader {
   explicit LogReader(std::unique_ptr<SequentialFile> source);
 
   // Reads the next logical record into *scratch, pointing *record at it.
-  // Returns false at a clean end of file, at a truncated tail, or at the first
-  // corruption -- the caller cannot distinguish them, and does not need to:
-  // everything returned so far is durable, and everything after is not.
+  // Returns false at a clean end of file, at a torn tail, or at the first
+  // damage.  Everything returned so far is durable; whether the stop is the
+  // end of what was ever written, or a hole with more after it, is what
+  // truncated() and damaged() below say.
   //
   // `truncated` is set when the stop was caused by damage rather than a tidy
   // end, so callers that care (recovery reporting) can say so.
@@ -94,15 +95,42 @@ class LogReader {
   bool truncated() const { return truncated_; }
   const std::string& failure_reason() const { return failure_reason_; }
 
+  // True when the stop was damage with readable records after it -- a flipped
+  // bit in the middle of the file -- rather than a write that never finished.
+  //
+  // The two look alike at the point of failure and mean opposite things.  A
+  // torn tail is what a crash leaves: the record being written when the
+  // process died, and nothing after it, because nothing was written after
+  // it.  Stopping there yields exactly the durable prefix.  Damage in the
+  // middle has intact records after it, whose contents *did* become durable;
+  // stopping there yields a state the file had moved past, and a caller who
+  // treated it as the durable prefix would act on it -- a manifest reader
+  // would serve an older version of the database and then delete every
+  // table the later records name, as unreferenced.  So the reader looks past
+  // the failure for a record it can verify, and says which of the two it saw.
+  //
+  // Also true when the file could not be read to its end: unread bytes are
+  // not a tail, whatever they hold.
+  bool damaged() const { return damaged_ || read_failed_; }
+
  private:
   bool read_physical_record(RecordType* type, std::string_view* payload);
   bool load_next_block();
+
+  // Ends the read: records the reason, and decides whether the stop is a
+  // torn tail or damage by looking for a verifiable record from
+  // `resume_offset` onward.
+  void stop(const char* reason, size_t resume_offset);
+  bool readable_record_follows(size_t walk_from, size_t scan_from);
+  bool verifies_to_block_end(size_t start) const;
 
   std::unique_ptr<SequentialFile> source_;
   std::string block_;          // the 32 KiB currently being parsed
   size_t block_offset_ = 0;    // read position within block_
   bool eof_ = false;
   bool truncated_ = false;
+  bool damaged_ = false;
+  bool read_failed_ = false;
   std::string failure_reason_;
 };
 

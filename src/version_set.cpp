@@ -829,6 +829,7 @@ Status VersionSet::recover(bool* save_manifest) {
 
   Builder builder(this, current_);
   int records = 0;
+  bool torn = false;
 
   {
     LogReader reader(std::move(file));
@@ -871,14 +872,32 @@ Status VersionSet::recover(bool* save_manifest) {
       }
     }
 
+    if (status.is_ok() && reader.damaged()) {
+      // Not a torn tail: intact records follow the damage, so the edits
+      // after it *did* become durable, and the tables they name are on disk.
+      // The state read so far is one the database moved past.  Opening on it
+      // would serve that older state and then, in the cleanup that follows
+      // every open, delete each of those tables as unreferenced -- and since
+      // new edits are appended after the damage, every later open would
+      // repeat it.  Refused instead, with every file left where it is.
+      status = Status::corruption(
+          "manifest " + manifest_base + " stops before its end (" +
+          reader.failure_reason() +
+          ") and not at a torn tail: records or unread bytes follow, so "
+          "opening would roll the database back past them and delete what "
+          "they name");
+    }
+
     if (status.is_ok() && reader.truncated()) {
       // A manifest whose tail was lost is not fatal.  Every record before the
       // damage is a complete edit, and the state they describe is a state the
       // database really was in; the edits after it never became durable, so
-      // nothing referenced them.  Recovery stops there and carries on.
+      // nothing referenced them.  Recovery stops there and carries on -- but
+      // not in this file: see `torn` below.
       //
       // What *is* fatal is a manifest with no usable records at all, which the
       // checks below catch.
+      torn = true;
     }
   }
 
@@ -923,8 +942,13 @@ Status VersionSet::recover(bool* save_manifest) {
       parse_file_name(manifest_base, &reused_number, &reused_type) &&
       reused_type == FileType::kDescriptor;
 
+  // A torn tail rules reuse out as well.  Appending would put every later
+  // edit behind the torn record, where the reader stops: unreadable at the
+  // next open, so the database would come back without them -- and would
+  // delete the tables they name.  A fresh manifest is written from a
+  // snapshot instead, and the torn one is left behind for cleanup.
   uint64_t size = 0;
-  if (parsed && file_size(manifest_path, &size).is_ok() &&
+  if (!torn && parsed && file_size(manifest_path, &size).is_ok() &&
       size <= options_.max_file_size) {
     std::unique_ptr<WritableFile> appendable;
     if (WritableFile::open(manifest_path, /*append=*/true, &appendable).is_ok()) {

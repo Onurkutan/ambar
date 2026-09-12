@@ -335,6 +335,18 @@ Status DBImpl::recover_log_file(uint64_t log_number, bool last_log,
     }
   }
 
+  if (status.is_ok() && reader.damaged()) {
+    // Intact records follow the damage: this is a hole in the middle of the
+    // log, not the torn tail a crash leaves, and the batches after it were
+    // acknowledged -- with sync, promised durable.  Replaying up to the hole
+    // and calling that recovery would drop them without a word.
+    status = Status::corruption(
+        "log " + std::to_string(log_number) + " stops before its end (" +
+        reader.failure_reason() +
+        ") and not at a torn tail: records or unread bytes follow, and "
+        "replaying up to the stop would silently drop the writes they hold");
+  }
+
   if (status.is_ok() && reader.truncated()) {
     // Expected, not exceptional: the tail of the last log is whatever the
     // process was in the middle of writing when it died.  Everything before it

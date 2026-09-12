@@ -390,6 +390,30 @@ copies of a real database — bit flips, truncations, runs of garbage — under
 AddressSanitizer, requiring only that each one produces a status rather than a
 crash.
 
+A status rather than a crash is the floor. Two more rules sit above it, both
+about damage to the files that *describe* the database rather than the ones
+that hold it, because there the wrong answer is not a crash but a quiet loss:
+
+* **A lost `CURRENT` is refused, not created over.** With `create_if_missing`,
+  a directory with no `CURRENT` used to read as empty and get a fresh manifest
+  — after which the cleanup that follows every open deleted each table the
+  fresh manifest did not name. A directory holding table or log files but no
+  `CURRENT` is now a database that lost its manifest, and open says so. Only
+  a manifest with nothing pointing at it *and* nothing beside it — the shape
+  `new_db` leaves when it dies before writing `CURRENT` — is still created
+  over.
+* **Damage in the middle of a log-format file is told apart from a torn
+  tail.** Both stop the reader at the same place. A torn tail is the record
+  being written when the process died, with nothing after it, and recovery is
+  right to treat everything before it as the whole file. Damage in the middle
+  has intact records after it, whose contents did become durable; treating
+  the stop as the end serves a state the file had moved past — for the
+  manifest, an older version of the database, after which cleanup deleted
+  every table the newer records named. `LogReader` now looks past a failure
+  for a record it can verify, and `damaged()` says whether it found one; both
+  the manifest reader and log replay refuse in that case, with every file left
+  in place.
+
 What this does *not* claim: the engine is not hardened against an adversary who
 can also choose when to interrupt it, and a file that passes every check can
 still contain wrong data. The checksum tells you a block is the block that was

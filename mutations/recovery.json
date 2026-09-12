@@ -5,5 +5,25 @@
     "src/db_impl.cpp",
     "    if (data_files > 0) {",
     "    if (data_files < 0) {"
+  ],
+  "log reader: never look past a failure, so damage reads as a torn tail": [
+    "src/wal.cpp",
+    "  damaged_ = readable_record_follows(resume_offset, scan_from);",
+    "  damaged_ = false;\n  (void)resume_offset;\n  (void)scan_from;"
+  ],
+  "manifest recovery: carry on past damage in the middle as if it were the tail": [
+    "src/version_set.cpp",
+    "    if (status.is_ok() && reader.damaged()) {",
+    "    if (false && reader.damaged()) {"
+  ],
+  "manifest recovery: append to a manifest whose tail was torn": [
+    "src/version_set.cpp",
+    "  if (!torn && parsed && file_size(manifest_path, &size).is_ok() &&",
+    "  if (parsed && file_size(manifest_path, &size).is_ok() &&"
+  ],
+  "log recovery: replay up to a hole in the middle and call it the prefix": [
+    "src/db_impl.cpp",
+    "  if (status.is_ok() && reader.damaged()) {",
+    "  if (false && reader.damaged()) {"
   ]
 }
