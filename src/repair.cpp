@@ -36,7 +36,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -67,7 +66,8 @@ namespace {
 constexpr size_t kMergeFanIn = 256;
 
 std::string base_name(const std::string& path) {
-  return std::filesystem::path(path).filename().string();
+  const size_t slash = path.find_last_of("/\\");
+  return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
 // Moves a file into <name>/lost/, which must be a real directory -- a link
@@ -76,10 +76,8 @@ std::string base_name(const std::string& path) {
 Status set_aside(const std::string& name, const std::string& path,
                  const std::string& why, RepairReport* report) {
   const std::string lost = name + "/lost";
-  std::error_code ec;
-  const auto existing = std::filesystem::symlink_status(lost, ec);
-  if (!ec && std::filesystem::exists(existing) &&
-      !std::filesystem::is_directory(existing)) {
+  const PathType existing = path_type(lost);
+  if (existing != PathType::kMissing && existing != PathType::kDirectory) {
     return Status::io_error("'" + lost + "' exists and is not a directory");
   }
   Status status = create_directory(lost);
@@ -445,22 +443,21 @@ Status repair_db(const std::string& name, const Options& options,
   std::vector<std::pair<uint64_t, std::string>> tables;
   std::vector<std::pair<uint64_t, std::string>> logs;
   std::vector<std::string> manifests;
+  // (path, why) of every file to be moved into lost/, once it is safe to.
+  std::vector<std::pair<std::string, std::string>> to_set_aside;
   uint64_t highest = 0;
-  std::error_code ec;
-  for (const auto& entry : std::filesystem::directory_iterator(name, ec)) {
+  std::vector<std::string> names;
+  status = list_directory(name, &names);
+  if (!status.is_ok()) return status;
+  for (const std::string& base : names) {
     uint64_t number = 0;
     FileType type;
-    if (!parse_file_name(base_name(entry.path().string()), &number, &type)) {
-      continue;
-    }
+    if (!parse_file_name(base, &number, &type)) continue;
     highest = std::max(highest, number);
-    const std::string path = entry.path().string();
+    const std::string path = name + "/" + base;
     if (type == FileType::kTable) tables.emplace_back(number, path);
     if (type == FileType::kLog) logs.emplace_back(number, path);
     if (type == FileType::kDescriptor) manifests.push_back(path);
-  }
-  if (ec) {
-    return Status::io_error("cannot list '" + name + "': " + ec.message());
   }
   if (tables.empty() && logs.empty()) {
     return Status::invalid_argument(
@@ -513,8 +510,7 @@ Status repair_db(const std::string& name, const Options& options,
         report->notes.push_back(base_name(path) + ": " +
                                 std::to_string(entries) + " entries");
       } else {
-        status = set_aside(name, path, status.to_string(), report);
-        if (!status.is_ok()) return status;
+        to_set_aside.emplace_back(path, status.to_string());
         ++report->tables_set_aside;
       }
     }
@@ -527,12 +523,10 @@ Status repair_db(const std::string& name, const Options& options,
       if (!status.is_ok()) return status;  // repair's own writes failed
       if (outcome.opened) ++report->logs_converted;
       if (outcome.early) {
-        status = set_aside(name, path,
-                           std::to_string(outcome.batches) +
-                               " batches replayed, then stopped early: " +
-                               outcome.how_it_ended,
-                           report);
-        if (!status.is_ok()) return status;
+        to_set_aside.emplace_back(path, std::to_string(outcome.batches) +
+                                            " batches replayed, then stopped "
+                                            "early: " +
+                                            outcome.how_it_ended);
         ++report->logs_set_aside;
       } else {
         report->notes.push_back(base_name(path) + ": " +
@@ -573,15 +567,10 @@ Status repair_db(const std::string& name, const Options& options,
     }
   }
 
-  // The old manifests and CURRENT are the record of what went wrong.  They
-  // are set aside, not left for cleanup to delete.
+  // The old manifests are the record of what went wrong.  They are set
+  // aside, not left for cleanup to delete.
   for (const std::string& manifest : manifests) {
-    status = set_aside(name, manifest, "superseded", report);
-    if (!status.is_ok()) return status;
-  }
-  if (file_exists(current_file_name(name))) {
-    status = set_aside(name, current_file_name(name), "superseded", report);
-    if (!status.is_ok()) return status;
+    to_set_aside.emplace_back(manifest, "superseded");
   }
 
   // The manifest: the merged tables at the last level, where files must not
@@ -618,8 +607,29 @@ Status repair_db(const std::string& name, const Options& options,
     remove_file(manifest);
     return status;
   }
+  // Its directory sync also commits the names of the merged tables, which
+  // is why none was needed as they were written.
   status = set_current_file(name, manifest_number);
   if (!status.is_ok()) return status;
+
+  // Only now is anything moved.  Every file repair could not use is still
+  // where it was found until the manifest that replaces it is in place, so
+  // a power cut in the middle of a repair leaves either the directory as it
+  // was -- which refuses to open for the same reason, and is repaired again
+  // -- or the repaired one.  Moving a log into lost/ before that would let
+  // a cut leave the old manifest in charge of a directory the log had
+  // already left, and that opens: nothing missing that the manifest knows
+  // of, and the batches the log held gone without a word.
+  for (const auto& [path, why] : to_set_aside) {
+    status = set_aside(name, path, why, report);
+    if (!status.is_ok()) {
+      return Status::io_error(
+          "the repaired manifest is in place, but a file it replaced could "
+          "not be moved to lost/ (" + status.to_string() +
+          "); the database opens, and the next open's cleanup will delete "
+          "what was not moved");
+    }
+  }
 
   // Then open it, as the caller is about to.  This is what says the repair
   // worked, and its cleanup is what removes the files the merge replaced.

@@ -136,14 +136,16 @@ struct RepairReport {
 // Every table that opens and reads to its end, in order, is kept; every log
 // is replayed as far as it can be read, each batch checked before it is
 // applied; what will not read is moved to <name>/lost/ rather than deleted,
-// and so are the old manifests and CURRENT, which are the record of what
-// went wrong.  What was kept is merged -- each user key once, at its newest
-// version, deletions dropped, in tables that do not overlap -- read back,
-// and named by a fresh manifest at the last level, where nothing lies
-// beneath them and nothing schedules a compaction over them.  Finally the
-// database is opened, which is what says the repair worked, and whose
-// cleanup removes the files the merge replaced.  The report says what was
-// kept, what was set aside, and why.
+// and so are the old manifests, which are the record of what went wrong --
+// but only once the new manifest is in place, so that a power cut during
+// the repair leaves either the directory as it was or the repaired one.
+// What was kept is merged -- each user key once, at its newest version,
+// deletions dropped, in tables that do not overlap -- read back, and named
+// by a fresh manifest at the last level, where nothing lies beneath them
+// and nothing schedules a compaction over them.  Finally the database is
+// opened, which is what says the repair worked, and whose cleanup removes
+// the files the merge replaced.  The report says what was kept, what was
+// set aside, and why.
 //
 // What it cannot restore is the history that produced the files.  Two
 // consequences, both rare, both stated because the report is read under
@@ -157,10 +159,10 @@ struct RepairReport {
 //
 // Takes the lock open() takes, with the same limit: it keeps out another
 // process, and on POSIX not a second caller in this one.  A repair that
-// fails before the manifest is written leaves the directory as it found it,
-// apart from lost/; one that fails at the final open has already pointed
-// CURRENT at the merged tables and left every other file in place, and
-// says so.  Running it again reads the survivors and any merged tables
+// fails before the manifest is written leaves the directory as it found it;
+// one that fails at the final open has already pointed CURRENT at the
+// merged tables and left every other file in place or in lost/, and says
+// so.  Running it again reads the survivors and any merged tables
 // alike, and the merge collapses the overlap.  Not for a database that
 // opens: repair rewrites every table, and an intact database gains nothing
 // from that.

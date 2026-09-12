@@ -184,12 +184,75 @@ real one (step 4 above).
 It cannot check `fsync`. `SIGKILL` destroys the process and leaves everything
 the process had handed to the kernel intact, so a database that never calls
 `fsync` survives a process kill exactly as well as one that does. Verifying the
-`sync` half of the contract needs the storage itself to lose writes — a
-`dm-flakey` target, or a virtual machine snapshot taken mid-write — and neither
-is done here. **The `sync=true` guarantee therefore rests on the `fsync` calls
-being correct by inspection, not by test.** `mutations/README.md` records that
-explicitly, so that a green crash-test run is not mistaken for evidence it does
-not provide.
+`sync` half of the contract needs the storage itself to lose writes, and that
+is what the next section is for.
+
+### The power cut
+
+Everything the engine does to the disk goes through `src/file.hpp`, and the
+operating system behind it can be replaced — by a test, between databases —
+with `tests/sim_file_system.hpp`: a disk that keeps what `fsync` covered and,
+at a chosen instant, loses a random amount of the rest.
+`tests/test_powercut.cpp` runs the engine on it, cuts the power a few hundred
+times per platform, reboots, and compares the database with a model of what
+was acknowledged. Every batch
+acknowledged with `sync` must be there; what comes back must be a prefix of the
+acknowledged batches, each whole, in order; and nothing may be there that
+nobody wrote. `tools/powercut` runs the same for as long as asked.
+
+The disk's model is written out in its header so a green run can be judged.
+Briefly: a file is a synced prefix and an unsynced tail, and a cut keeps a
+random length of the tail, independently per file. The size may run ahead of
+the data, leaving pages that read as zeros (what ext4 and xfs leave today) or
+as garbage (what their older writeback modes left). Names — creating,
+renaming, deleting a file — land in journal order, committed by a directory
+sync; or,
+on the more forgiving setting, also by a sync of the file they name, which is
+what every filesystem in use does and POSIX does not promise. Nothing is
+modelled that would make the disk kinder than any of those, and the tests
+first check the disk itself: that unsynced bytes are lost sometimes and synced
+ones never, that a file whose name was never synced can vanish, that the synced
+prefix survives whatever the tail does.
+
+The cuts landed in the first minute, before any mutation was tried:
+
+* **The prefix promise was broken at every log rotation.** When the memtable
+  filled, the old log was closed and a new one opened, and nothing synced the
+  old one until its memtable had been written out as a table. A `sync` write
+  into the new log made *that* file durable and nothing else, so a power cut in
+  the window left the new log's batches on disk and the old log's unsynced
+  tail gone: later writes present, earlier ones missing, which is not a prefix.
+  A process kill cannot show this, because the kernel keeps both tails. The
+  old log is now synced before the new one takes over, once per
+  `write_buffer_size` of writes and never on the path of a single one.
+* **A new log's name was never synced.** The first synced write into a log
+  created a moment earlier was durable in a file whose directory entry was not.
+  On Linux filesystems `fsync` of a new file happens to carry its name; POSIX
+  says nothing of the kind, and the stricter setting of the simulator lost the
+  batch. The directory is now synced after every log and table is created,
+  before anything depends on the name.
+
+The mutations in `mutations/powercut.json` remove the engine's syncs one at a
+time — the log's, a table's, a compaction output's, the manifest's,
+`CURRENT`'s, the two above — and `tools/mutate.py` reports every one caught,
+which is the sentence the previous version of this section could not write. Two syncs are
+listed as expected to survive, with the reason: repair's sync of its own
+manifest, and the directory sync after the `CURRENT` rename, which the
+journal's own ordering makes harmless — a cut there leaves the previous
+manifest in charge of files that are all still present.
+
+Three things the simulation does not do, stated rather than glossed. It does
+not exercise the platform: whether `fsync` on macOS reaches the platter
+(`F_FULLFSYNC` is used, for files and directories), whether Windows flushes a
+directory entry (the call is undocumented and attempted anyway, its failure
+not reported), whether a disk lies. It runs one writer, so group commit never
+merges two batches into one record; `tools/crash_test` covers that against a
+process kill and the code is the same. And its garbage is random bytes, not a
+deleted file's: a writeback-mode filesystem can extend a new log over blocks
+that still hold intact records of the log it replaced, and the log format
+carries nothing that would tell those from new ones. That is the one state
+that could make the engine replay old writes as new rather than refuse, it is
+what RocksDB's recycled-log record header exists for, and it is not modelled.
 
 ### After an I/O error
 
@@ -217,11 +280,15 @@ Two further things the engine does not promise, stated rather than glossed:
   reaching stable storage, no user-space program can help. (On macOS this is why
   `F_FULLFSYNC` is used: plain `fsync` there returns once the drive *cache* has
   the data.)
-* On Windows the containing directory is not fsynced after a file is created,
-  because the platform offers no handle for it. A crash in that window can lose
-  a newly created table's directory entry. The manifest records the table, so
-  recovery detects the absence and reports corruption rather than silently
-  serving a database with a hole in it.
+* On Windows the platform documents no way to flush a directory's entries.
+  `FlushFileBuffers` on a directory handle succeeds on a local NTFS volume and
+  is attempted, but its failure is not reported, so a power cut on a share can
+  still lose a newly created file's directory entry. For a table the manifest
+  records the file, so recovery detects the absence and reports corruption
+  rather than silently serving a database with a hole in it. For a log there
+  is no such record: a synced batch written into a log created moments
+  before the cut would be gone without a report. That is the case the
+  simulator's stricter setting is for, and on a share it is not covered.
 
 ## One process at a time
 
@@ -267,6 +334,14 @@ node with a release store, traversal reads with acquire loads, so a concurrent
 reader either sees a complete node or does not see it at all. It admits one
 writer at a time (the write mutex ensures that) and any number of readers with no
 locking on the read side.
+
+Everything that rotates the log goes through the writer queue, including
+`compact_range`, which flushes the memtable as a write with nothing in it.
+The rotation releases the mutex around two syncs (see *The power cut* above)
+on the strength of being the only writer, and only the front of the queue is
+that; `compact_range` used to rotate under the mutex alone, which was a race
+against a writer using the log with the mutex released, and with the syncs
+would have been two rotations at once. Found by review of that change.
 
 ## On-disk layout
 
@@ -436,14 +511,24 @@ Then it merges what it kept: every user key once, at its newest version, in
 order, into tables that do not overlap, in rounds of at most 256 inputs so
 that a large database does not need more open files than a process is
 allowed. It reads the merged tables back, writes a fresh manifest naming them,
-and finally opens the database, which is what says the repair worked. Nothing
-is deleted by repair itself: a file that would not read is moved to
-`<dir>/lost/`, the old manifests and `CURRENT` are moved there too as the
-record of what went wrong, and the files the merge replaced are left for that
-last open's cleanup, which removes only what the new manifest does not name.
-A log that stopped early -- a torn tail, or damage -- is replayed to the stop
-and then moved to `lost/`, with a note that says whether intact records
-followed the stop, so the bytes past it are still there for a person.
+points `CURRENT` at it, and finally opens the database, which is what says the
+repair worked. Nothing is deleted by repair itself: a file that would not read
+is moved to `<dir>/lost/`, the old manifests are moved there too as the record
+of what went wrong, and the files the merge replaced are left for that last
+open's cleanup, which removes only what the new manifest does not name. A log
+that stopped early -- a torn tail, or damage -- is replayed to the stop and
+then moved to `lost/`, with a note that says whether intact records followed
+the stop, so the bytes past it are still there for a person.
+
+Nothing is moved until the new manifest is in place. The first draft moved
+each log into `lost/` as soon as it had been converted, and a power cut between
+that and the new `CURRENT` would have left the old manifest in charge of a
+directory the log had already left -- which opens, since the manifest knows
+nothing of the log, and whose cleanup then deletes the tables the log had
+become. The batches in that log, synced ones included, would have been gone
+without a word. It was found by review of the power-cut simulation's checks,
+before the sweep that now cuts the power at every point of a repair could find
+it.
 
 Merging is the part that matters, and the first draft did not do it. The
 obvious repair names the surviving tables in a manifest at level 0 and lets
@@ -496,6 +581,10 @@ which file it sits in.
 * `tools/crash_test` — runs a writer in a child process, kills it with `SIGKILL`
   at a random instant, reopens the database, and checks the durability contract
   above. Ordering bugs are invisible to ordinary tests and obvious to this one.
+* `tests/test_powercut.cpp` and `tools/powercut` — the same contract against a
+  disk that loses unsynced writes, in this process, on every platform. Missing
+  `fsync`s are invisible to the crash test and obvious to this one; it found
+  two, described under *Durability* above.
 * `tools/bench` — throughput and latency for sequential and random workloads,
   with and without `sync`, reported as percentiles because an average hides
   what compaction does to the tail. It measures **space** amplification —

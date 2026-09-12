@@ -111,6 +111,8 @@ add_executable(ambar_tests
   tests/test_db.cpp
   tests/test_corrupt.cpp
   tests/test_repair.cpp
+  tests/test_powercut.cpp
+  tests/sim_file_system.cpp
 )
 target_link_libraries(ambar_tests PRIVATE ambar Threads::Threads)
 target_include_directories(ambar_tests PRIVATE src tests)
@@ -120,6 +122,12 @@ add_test(NAME unit COMMAND ambar_tests)
 # build rather than being discovered when someone comes to run them.
 add_executable(ambar_repair tools/repair.cpp)
 target_link_libraries(ambar_repair PRIVATE ambar Threads::Threads)
+
+# The power-cut simulation: the disk is a test double from tests/, and the
+# tool runs everywhere the tests do.
+add_executable(ambar_powercut tools/powercut.cpp tests/sim_file_system.cpp)
+target_link_libraries(ambar_powercut PRIVATE ambar Threads::Threads)
+target_include_directories(ambar_powercut PRIVATE src tests)
 
 if(NOT MSVC)
   add_executable(ambar_crash_test tools/crash_test.cpp)

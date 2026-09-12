@@ -2,10 +2,17 @@
 //
 // The thin layer between Ambar and the operating system.
 //
-// Kept deliberately small: three file abstractions and one honest fsync.  The
-// point of isolating them is that durability lives or dies on exactly one
-// question -- has this byte reached stable storage? -- and that question should
-// have exactly one answer in the codebase.
+// Kept deliberately small: three file abstractions, a lock, a handful of
+// directory operations, and one honest fsync.  The point of isolating them
+// is that durability lives or dies on exactly one question -- has this byte
+// reached stable storage? -- and that question should have exactly one
+// answer in the codebase.
+//
+// Everything here is reached through a FileSystem (bottom of this file).
+// There is one, it is the operating system, and nothing in the engine knows
+// otherwise -- except that a test can install another.  That is what lets
+// tools/powercut.cpp put a disk that loses unsynced writes underneath the
+// engine and check the durability contract instead of reading it.
 #pragma once
 
 #include <cstdint>
@@ -13,6 +20,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "ambar/status.hpp"
 
@@ -25,33 +33,25 @@ class WritableFile {
  public:
   static Status open(const std::string& path, bool append,
                      std::unique_ptr<WritableFile>* out);
-  ~WritableFile();
+
+  WritableFile() = default;
+  virtual ~WritableFile();
 
   WritableFile(const WritableFile&) = delete;
   WritableFile& operator=(const WritableFile&) = delete;
 
-  Status append(std::string_view data);
+  virtual Status append(std::string_view data) = 0;
 
   // Hands the buffer to the kernel.  Survives a process crash, not a power cut.
-  Status flush();
+  virtual Status flush() = 0;
 
   // Waits for the kernel to hand the data to the device.  This is the call the
   // durability contract is written in terms of, and the one that costs
-  // milliseconds.
-  Status sync();
+  // milliseconds.  Flushes first: a sync of bytes still in this process would
+  // be a sync of nothing.
+  virtual Status sync() = 0;
 
-  Status close();
-
-  uint64_t bytes_written() const { return bytes_written_; }
-  const std::string& path() const { return path_; }
-
- private:
-  WritableFile(std::FILE* file, std::string path)
-      : file_(file), path_(std::move(path)) {}
-
-  std::FILE* file_ = nullptr;
-  std::string path_;
-  uint64_t bytes_written_ = 0;
+  virtual Status close() = 0;
 };
 
 // Read the whole file, once, forwards.  What log replay and table loading need.
@@ -59,21 +59,17 @@ class SequentialFile {
  public:
   static Status open(const std::string& path,
                      std::unique_ptr<SequentialFile>* out);
-  ~SequentialFile();
+
+  SequentialFile() = default;
+  virtual ~SequentialFile();
 
   SequentialFile(const SequentialFile&) = delete;
   SequentialFile& operator=(const SequentialFile&) = delete;
 
   // Reads up to n bytes into *scratch and points *result at them.  A short read
   // means end of file, which for a log is a normal and expected way to finish.
-  Status read(size_t n, std::string_view* result, std::string* scratch);
-
- private:
-  explicit SequentialFile(std::FILE* file, std::string path)
-      : file_(file), path_(std::move(path)) {}
-
-  std::FILE* file_ = nullptr;
-  std::string path_;
+  virtual Status read(size_t n, std::string_view* result,
+                      std::string* scratch) = 0;
 };
 
 // Read any part of the file, from any thread, at any time.  What table files
@@ -94,6 +90,7 @@ class SequentialFile {
 // lookup actually reads, which is the only way to demonstrate that the bloom
 // filter prevents reads rather than merely claiming to; and a future
 // memory-mapped implementation slots in without the table code changing.
+// The same arithmetic is why the other two classes are virtual as well.
 class RandomAccessFile {
  public:
   static Status open(const std::string& path,
@@ -136,22 +133,18 @@ class FileLock {
   // a message that says so rather than reporting a generic failure.
   static Status acquire(const std::string& path,
                         std::unique_ptr<FileLock>* out);
-  ~FileLock();
+
+  FileLock() = default;
+  virtual ~FileLock();
 
   FileLock(const FileLock&) = delete;
   FileLock& operator=(const FileLock&) = delete;
-
- private:
-#if defined(_WIN32)
-  FileLock(void* handle, std::string path)
-      : handle_(handle), path_(std::move(path)) {}
-  void* handle_ = nullptr;
-#else
-  FileLock(int fd, std::string path) : fd_(fd), path_(std::move(path)) {}
-  int fd_ = -1;
-#endif
-  std::string path_;
 };
+
+// What a path names, without following a link: a link is reported as
+// kOther, so a caller that is about to create a directory or a file at a
+// predictable name can refuse one that has been planted there.
+enum class PathType { kMissing, kFile, kDirectory, kOther };
 
 // Filesystem helpers, each returning a Status rather than throwing, so callers
 // can decide what a missing file means in their context.
@@ -159,11 +152,62 @@ Status file_size(const std::string& path, uint64_t* size);
 Status remove_file(const std::string& path);
 Status rename_file(const std::string& from, const std::string& to);
 bool file_exists(const std::string& path);
+PathType path_type(const std::string& path);
 Status create_directory(const std::string& path);
+// Removes a directory that is empty; anything else is an error.
+Status remove_directory(const std::string& path);
+// The names (not paths) of the entries in a directory, in no particular
+// order.  A directory that does not exist is an error, not an empty listing:
+// the two mean different things to recovery.
+Status list_directory(const std::string& path,
+                      std::vector<std::string>* names);
 
-// Fsyncs a directory, so that a file created inside it is guaranteed to be
-// findable after a crash.  A no-op on Windows, where directories are not
-// openable as files -- documented rather than silently skipped.
+// Fsyncs a directory, so that a file created, renamed or removed inside it
+// is guaranteed to be findable, or gone, after a power cut.  On Windows,
+// where the platform documents no such call, it is attempted on a
+// directory handle and its failure is not reported -- see file.cpp.
 Status sync_directory(const std::string& path);
+
+// The operating system, as far as the engine is concerned.  Every function
+// and static open() above forwards to the one installed; the default is the
+// real one, in file.cpp.
+//
+// Replacing it is for tests, and only between databases: install before a
+// DB is opened, put the previous one back after the last DB is closed.  A
+// database open across the swap would carry handles from one filesystem
+// into another.  It is a process-wide pointer rather than a field in
+// Options because this header is private to the engine and the seam exists
+// for one test double; a field would reach the same forty-odd call sites
+// through six files and two free functions that hold no Options, for the
+// benefit of nobody outside tests/.
+class FileSystem {
+ public:
+  virtual ~FileSystem();
+
+  virtual Status new_writable_file(const std::string& path, bool append,
+                                   std::unique_ptr<WritableFile>* out) = 0;
+  virtual Status new_sequential_file(const std::string& path,
+                                     std::unique_ptr<SequentialFile>* out) = 0;
+  virtual Status new_random_access_file(
+      const std::string& path, std::unique_ptr<RandomAccessFile>* out) = 0;
+  virtual Status lock_file(const std::string& path,
+                           std::unique_ptr<FileLock>* out) = 0;
+
+  virtual Status file_size(const std::string& path, uint64_t* size) = 0;
+  virtual Status remove_file(const std::string& path) = 0;
+  virtual Status rename_file(const std::string& from,
+                             const std::string& to) = 0;
+  virtual PathType path_type(const std::string& path) = 0;
+  virtual Status create_directory(const std::string& path) = 0;
+  virtual Status remove_directory(const std::string& path) = 0;
+  virtual Status list_directory(const std::string& path,
+                                std::vector<std::string>* names) = 0;
+  virtual Status sync_directory(const std::string& path) = 0;
+};
+
+FileSystem* file_system();
+// Installs `fs` and returns the one it replaced; nullptr restores the real
+// one.
+FileSystem* set_file_system(FileSystem* fs);
 
 }  // namespace ambar

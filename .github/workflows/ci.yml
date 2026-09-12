@@ -127,6 +127,14 @@ jobs:
       - name: Fail one fsync at a time across every manifest write
         run: ./tools/fault_sweep.sh build 2
 
+      # And the one a kill cannot produce either: the disk losing what was
+      # not synced.  The unit suite runs a few hundred cuts on every platform;
+      # this runs a few thousand under the two least forgiving models.
+      - name: Cut the power a few thousand times on a simulated disk
+        run: |
+          ./build/ambar_powercut --dirents posix --tails holes --seeds 6 --cycles 250
+          ./build/ambar_powercut --dirents posix --tails garbage --seeds 6 --cycles 250
+
   # Everything above feeds the engine files it wrote itself, or files damaged
   # by hand in ways somebody thought of.  This feeds each parser of untrusted
   # bytes -- table, block, filter, log, batch, manifest -- inputs nobody thought

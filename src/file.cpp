@@ -2,6 +2,7 @@
 
 #include "file.hpp"
 
+#include <atomic>
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
@@ -143,11 +144,25 @@ Status stream_from_handle(HANDLE handle, int crt_flags, const char* mode,
 
 #endif
 
-}  // namespace
-
 // ---------------------------------------------------------- WritableFile ---
-Status WritableFile::open(const std::string& path, bool append,
-                          std::unique_ptr<WritableFile>* out) {
+class LocalWritableFile final : public WritableFile {
+ public:
+  LocalWritableFile(std::FILE* file, std::string path)
+      : file_(file), path_(std::move(path)) {}
+  ~LocalWritableFile() override;
+
+  Status append(std::string_view data) override;
+  Status flush() override;
+  Status sync() override;
+  Status close() override;
+
+ private:
+  std::FILE* file_ = nullptr;
+  std::string path_;
+};
+
+Status open_writable(const std::string& path, bool append,
+                     std::unique_ptr<WritableFile>* out) {
 #if defined(_WIN32)
   // OPEN_ALWAYS rather than CREATE_ALWAYS: a link at the path has to be seen
   // before anything is truncated, so a fresh file is truncated by hand once
@@ -193,17 +208,17 @@ Status WritableFile::open(const std::string& path, bool append,
     return Status::io_error(message);
   }
 #endif
-  out->reset(new WritableFile(file, path));
+  out->reset(new LocalWritableFile(file, path));
   return Status::ok();
 }
 
-WritableFile::~WritableFile() {
+LocalWritableFile::~LocalWritableFile() {
   if (file_ != nullptr) {
     std::fclose(file_);
   }
 }
 
-Status WritableFile::append(std::string_view data) {
+Status LocalWritableFile::append(std::string_view data) {
   if (file_ == nullptr) {
     return Status::io_error("append to closed file " + path_);
   }
@@ -211,11 +226,10 @@ Status WritableFile::append(std::string_view data) {
   if (written != data.size()) {
     return Status::io_error(errno_message("short write to", path_));
   }
-  bytes_written_ += written;
   return Status::ok();
 }
 
-Status WritableFile::flush() {
+Status LocalWritableFile::flush() {
   if (file_ == nullptr) return Status::ok();
   if (std::fflush(file_) != 0) {
     return Status::io_error(errno_message("cannot flush", path_));
@@ -223,7 +237,7 @@ Status WritableFile::flush() {
   return Status::ok();
 }
 
-Status WritableFile::sync() {
+Status LocalWritableFile::sync() {
   if (file_ == nullptr) return Status::ok();
   if (Status s = flush(); !s.is_ok()) return s;
 
@@ -248,7 +262,7 @@ Status WritableFile::sync() {
   return Status::ok();
 }
 
-Status WritableFile::close() {
+Status LocalWritableFile::close() {
   if (file_ == nullptr) return Status::ok();
   const int result = std::fclose(file_);
   file_ = nullptr;
@@ -259,8 +273,22 @@ Status WritableFile::close() {
 }
 
 // -------------------------------------------------------- SequentialFile ---
-Status SequentialFile::open(const std::string& path,
-                            std::unique_ptr<SequentialFile>* out) {
+class LocalSequentialFile final : public SequentialFile {
+ public:
+  LocalSequentialFile(std::FILE* file, std::string path)
+      : file_(file), path_(std::move(path)) {}
+  ~LocalSequentialFile() override;
+
+  Status read(size_t n, std::string_view* result,
+              std::string* scratch) override;
+
+ private:
+  std::FILE* file_ = nullptr;
+  std::string path_;
+};
+
+Status open_sequential(const std::string& path,
+                       std::unique_ptr<SequentialFile>* out) {
 #if defined(_WIN32)
   HANDLE handle = INVALID_HANDLE_VALUE;
   DWORD create_error = 0;
@@ -274,7 +302,7 @@ Status SequentialFile::open(const std::string& path,
                               "cannot open for reading", &file);
   if (!status.is_ok()) return status;
 #else
-  // Same symlink refusal as WritableFile::open, for the read side: CURRENT,
+  // Same symlink refusal as open_writable, for the read side: CURRENT,
   // a MANIFEST, and a log file are all opened by a predictable name inside a
   // directory that may not be trusted.
   const int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW);
@@ -289,16 +317,16 @@ Status SequentialFile::open(const std::string& path,
     return Status::io_error(message);
   }
 #endif
-  out->reset(new SequentialFile(file, path));
+  out->reset(new LocalSequentialFile(file, path));
   return Status::ok();
 }
 
-SequentialFile::~SequentialFile() {
+LocalSequentialFile::~LocalSequentialFile() {
   if (file_ != nullptr) std::fclose(file_);
 }
 
-Status SequentialFile::read(size_t n, std::string_view* result,
-                            std::string* scratch) {
+Status LocalSequentialFile::read(size_t n, std::string_view* result,
+                                 std::string* scratch) {
   scratch->resize(n);
   const size_t read_bytes = std::fread(scratch->data(), 1, n, file_);
   if (read_bytes < n && std::ferror(file_) != 0) {
@@ -309,10 +337,6 @@ Status SequentialFile::read(size_t n, std::string_view* result,
 }
 
 // ------------------------------------------------------ RandomAccessFile ---
-RandomAccessFile::~RandomAccessFile() = default;
-
-namespace {
-
 #if defined(_WIN32)
 class LocalRandomAccessFile final : public RandomAccessFile {
  public:
@@ -343,8 +367,8 @@ class LocalRandomAccessFile final : public RandomAccessFile {
 
 #if defined(_WIN32)
 
-Status open_impl(const std::string& path,
-                 std::unique_ptr<RandomAccessFile>* out) {
+Status open_random_access(const std::string& path,
+                          std::unique_ptr<RandomAccessFile>* out) {
   HANDLE handle = INVALID_HANDLE_VALUE;
   DWORD create_error = 0;
   const Status status = open_refusing_links(
@@ -399,9 +423,9 @@ Status LocalRandomAccessFile::read(uint64_t offset, size_t n,
 
 #else
 
-Status open_impl(const std::string& path,
-                 std::unique_ptr<RandomAccessFile>* out) {
-  // See WritableFile::open: a table file is opened by a predictable name in a
+Status open_random_access(const std::string& path,
+                          std::unique_ptr<RandomAccessFile>* out) {
+  // See open_writable: a table file is opened by a predictable name in a
   // directory that may not be trusted, so a symlink planted there is refused
   // rather than followed.
   const int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW);
@@ -451,18 +475,21 @@ Status LocalRandomAccessFile::read(uint64_t offset, size_t n,
 
 #endif
 
-}  // namespace
-
-Status RandomAccessFile::open(const std::string& path,
-                              std::unique_ptr<RandomAccessFile>* out) {
-  return open_impl(path, out);
-}
-
 // ------------------------------------------------------------- FileLock ---
 #if defined(_WIN32)
 
-Status FileLock::acquire(const std::string& path,
-                         std::unique_ptr<FileLock>* out) {
+class LocalFileLock final : public FileLock {
+ public:
+  LocalFileLock(void* handle, std::string path)
+      : handle_(handle), path_(std::move(path)) {}
+  ~LocalFileLock() override;
+
+ private:
+  void* handle_ = nullptr;
+  std::string path_;
+};
+
+Status acquire_lock(const std::string& path, std::unique_ptr<FileLock>* out) {
   // No sharing at all: the second opener fails outright, which is the
   // behaviour wanted here.
   HANDLE handle = INVALID_HANDLE_VALUE;
@@ -478,19 +505,28 @@ Status FileLock::acquire(const std::string& path,
     }
     return status;
   }
-  out->reset(new FileLock(handle, path));
+  out->reset(new LocalFileLock(handle, path));
   return Status::ok();
 }
 
-FileLock::~FileLock() {
+LocalFileLock::~LocalFileLock() {
   if (handle_ != nullptr) ::CloseHandle(static_cast<HANDLE>(handle_));
 }
 
 #else
 
-Status FileLock::acquire(const std::string& path,
-                         std::unique_ptr<FileLock>* out) {
-  // O_NOFOLLOW and 0600 for the same reasons as WritableFile::open: LOCK is a
+class LocalFileLock final : public FileLock {
+ public:
+  LocalFileLock(int fd, std::string path) : fd_(fd), path_(std::move(path)) {}
+  ~LocalFileLock() override;
+
+ private:
+  int fd_ = -1;
+  std::string path_;
+};
+
+Status acquire_lock(const std::string& path, std::unique_ptr<FileLock>* out) {
+  // O_NOFOLLOW and 0600 for the same reasons as open_writable: LOCK is a
   // predictable name in a directory that may not be trusted, and there is no
   // reason for anyone but the owner to see it exists.
   const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_NOFOLLOW, 0600);
@@ -518,11 +554,11 @@ Status FileLock::acquire(const std::string& path,
     return Status::io_error(errno_message("cannot lock", path));
   }
 
-  out->reset(new FileLock(fd, path));
+  out->reset(new LocalFileLock(fd, path));
   return Status::ok();
 }
 
-FileLock::~FileLock() {
+LocalFileLock::~LocalFileLock() {
   // Closing releases the lock.  The file itself is left behind: removing it
   // would let a second process create and lock a *new* file with the same name
   // while a third still held the old one.
@@ -532,61 +568,234 @@ FileLock::~FileLock() {
 #endif
 
 // ------------------------------------------------------------- utilities ---
+class LocalFileSystem final : public FileSystem {
+ public:
+  Status new_writable_file(const std::string& path, bool append,
+                           std::unique_ptr<WritableFile>* out) override {
+    return open_writable(path, append, out);
+  }
+  Status new_sequential_file(const std::string& path,
+                             std::unique_ptr<SequentialFile>* out) override {
+    return open_sequential(path, out);
+  }
+  Status new_random_access_file(
+      const std::string& path,
+      std::unique_ptr<RandomAccessFile>* out) override {
+    return open_random_access(path, out);
+  }
+  Status lock_file(const std::string& path,
+                   std::unique_ptr<FileLock>* out) override {
+    return acquire_lock(path, out);
+  }
+
+  Status file_size(const std::string& path, uint64_t* size) override {
+    std::error_code ec;
+    const auto value = std::filesystem::file_size(path, ec);
+    if (ec) {
+      return Status::io_error("cannot stat '" + path + "': " + ec.message());
+    }
+    *size = static_cast<uint64_t>(value);
+    return Status::ok();
+  }
+
+  Status remove_file(const std::string& path) override {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    if (ec) {
+      return Status::io_error("cannot remove '" + path + "': " + ec.message());
+    }
+    return Status::ok();
+  }
+
+  Status rename_file(const std::string& from, const std::string& to) override {
+    std::error_code ec;
+    std::filesystem::rename(from, to, ec);
+    if (ec) {
+      return Status::io_error("cannot rename '" + from + "' to '" + to +
+                              "': " + ec.message());
+    }
+    return Status::ok();
+  }
+
+  PathType path_type(const std::string& path) override {
+    // symlink_status, not status: a link is reported as what it is, not as
+    // what it points to, and a dangling one is still something at the path.
+    std::error_code ec;
+    const auto st = std::filesystem::symlink_status(path, ec);
+    if (ec || !std::filesystem::exists(st)) return PathType::kMissing;
+    if (std::filesystem::is_directory(st)) return PathType::kDirectory;
+    if (std::filesystem::is_regular_file(st)) return PathType::kFile;
+    return PathType::kOther;
+  }
+
+  Status create_directory(const std::string& path) override {
+    std::error_code ec;
+    std::filesystem::create_directories(path, ec);
+    if (ec) {
+      return Status::io_error("cannot create '" + path + "': " + ec.message());
+    }
+    return Status::ok();
+  }
+
+  Status remove_directory(const std::string& path) override {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);  // succeeds only if it is empty
+    if (ec) {
+      return Status::io_error("cannot remove '" + path + "': " + ec.message());
+    }
+    return Status::ok();
+  }
+
+  Status list_directory(const std::string& path,
+                        std::vector<std::string>* names) override {
+    names->clear();
+    std::error_code ec;
+    std::filesystem::directory_iterator it(path, ec);
+    // Advanced by hand: the range-for form advances with the operator that
+    // throws, and a directory that becomes unreadable halfway through a
+    // listing is an error like any other, not an exception on the
+    // compaction thread.
+    for (; !ec && it != std::filesystem::directory_iterator();
+         it.increment(ec)) {
+      names->push_back(it->path().filename().string());
+    }
+    if (ec) {
+      return Status::io_error("cannot list '" + path + "': " + ec.message());
+    }
+    return Status::ok();
+  }
+
+  Status sync_directory(const std::string& path) override {
+#if defined(_WIN32)
+    // Windows documents no way to flush a directory's entries.  A handle
+    // to the directory can be opened all the same, and FlushFileBuffers on
+    // it succeeds on a local NTFS volume and flushes the filesystem's own
+    // log, which is where the entries are; it fails on a network share.
+    // So it is attempted and its failure is not an error: what the
+    // platform does not promise, this code does not promise either, and
+    // docs/DESIGN.md says so.
+    HANDLE handle = ::CreateFileA(
+        path.c_str(), GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle != INVALID_HANDLE_VALUE) {
+      ::FlushFileBuffers(handle);
+      ::CloseHandle(handle);
+    }
+    return Status::ok();
+#else
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) {
+      return Status::io_error(errno_message("cannot open directory", path));
+    }
+#if defined(__APPLE__)
+    // As for files: plain fsync stops at the drive cache on macOS, and a
+    // directory entry in the drive cache is as lost to a power cut as a
+    // byte of data there.
+    int result = fcntl(fd, F_FULLFSYNC);
+    if (result == -1) result = fsync(fd);
+#else
+    const int result = fsync(fd);
+#endif
+    ::close(fd);
+    if (result != 0) {
+      return Status::io_error(errno_message("cannot sync directory", path));
+    }
+    return Status::ok();
+#endif
+  }
+};
+
+// A function-local static rather than a namespace-scope object: a
+// polymorphic object is not constant-initialised, and a static initialiser
+// in another translation unit that touched the filesystem would find it
+// unconstructed.  The pointer is atomic so that a swap and a concurrent
+// read are at least defined, though a swap with a database open is a
+// mistake either way (see the header).
+LocalFileSystem& local_file_system() {
+  static LocalFileSystem instance;
+  return instance;
+}
+
+std::atomic<FileSystem*> current_file_system{nullptr};  // nullptr: the local
+
+FileSystem* current() {
+  FileSystem* fs = current_file_system.load(std::memory_order_acquire);
+  return fs != nullptr ? fs : &local_file_system();
+}
+
+}  // namespace
+
+// ----------------------------------------------------------- forwarders ---
+WritableFile::~WritableFile() = default;
+SequentialFile::~SequentialFile() = default;
+RandomAccessFile::~RandomAccessFile() = default;
+FileLock::~FileLock() = default;
+FileSystem::~FileSystem() = default;
+
+FileSystem* file_system() { return current(); }
+
+FileSystem* set_file_system(FileSystem* fs) {
+  FileSystem* previous = current();
+  current_file_system.store(fs, std::memory_order_release);
+  return previous;
+}
+
+Status WritableFile::open(const std::string& path, bool append,
+                          std::unique_ptr<WritableFile>* out) {
+  return current()->new_writable_file(path, append, out);
+}
+
+Status SequentialFile::open(const std::string& path,
+                            std::unique_ptr<SequentialFile>* out) {
+  return current()->new_sequential_file(path, out);
+}
+
+Status RandomAccessFile::open(const std::string& path,
+                              std::unique_ptr<RandomAccessFile>* out) {
+  return current()->new_random_access_file(path, out);
+}
+
+Status FileLock::acquire(const std::string& path,
+                         std::unique_ptr<FileLock>* out) {
+  return current()->lock_file(path, out);
+}
+
 Status file_size(const std::string& path, uint64_t* size) {
-  std::error_code ec;
-  const auto value = std::filesystem::file_size(path, ec);
-  if (ec) return Status::io_error("cannot stat '" + path + "': " + ec.message());
-  *size = static_cast<uint64_t>(value);
-  return Status::ok();
+  return current()->file_size(path, size);
 }
 
 Status remove_file(const std::string& path) {
-  std::error_code ec;
-  std::filesystem::remove(path, ec);
-  if (ec) return Status::io_error("cannot remove '" + path + "': " + ec.message());
-  return Status::ok();
+  return current()->remove_file(path);
 }
 
 Status rename_file(const std::string& from, const std::string& to) {
-  std::error_code ec;
-  std::filesystem::rename(from, to, ec);
-  if (ec) {
-    return Status::io_error("cannot rename '" + from + "' to '" + to +
-                            "': " + ec.message());
-  }
-  return Status::ok();
+  return current()->rename_file(from, to);
 }
 
 bool file_exists(const std::string& path) {
-  std::error_code ec;
-  return std::filesystem::exists(path, ec);
+  return current()->path_type(path) != PathType::kMissing;
+}
+
+PathType path_type(const std::string& path) {
+  return current()->path_type(path);
 }
 
 Status create_directory(const std::string& path) {
-  std::error_code ec;
-  std::filesystem::create_directories(path, ec);
-  if (ec) {
-    return Status::io_error("cannot create '" + path + "': " + ec.message());
-  }
-  return Status::ok();
+  return current()->create_directory(path);
+}
+
+Status remove_directory(const std::string& path) {
+  return current()->remove_directory(path);
+}
+
+Status list_directory(const std::string& path,
+                      std::vector<std::string>* names) {
+  return current()->list_directory(path, names);
 }
 
 Status sync_directory(const std::string& path) {
-#if defined(_WIN32)
-  (void)path;  // Windows offers no handle to a directory's metadata here.
-  return Status::ok();
-#else
-  const int fd = ::open(path.c_str(), O_RDONLY);
-  if (fd < 0) {
-    return Status::io_error(errno_message("cannot open directory", path));
-  }
-  const int result = fsync(fd);
-  ::close(fd);
-  if (result != 0) {
-    return Status::io_error(errno_message("cannot sync directory", path));
-  }
-  return Status::ok();
-#endif
+  return current()->sync_directory(path);
 }
 
 }  // namespace ambar

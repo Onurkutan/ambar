@@ -43,6 +43,9 @@ Status build_table(const std::string& dbname, const Options& options,
   if (status.is_ok()) status = file->sync();
   if (status.is_ok()) status = file->close();
   file.reset();
+  // The directory entry too, before the manifest names the file: fsync of
+  // the file does not promise that its name reached the disk.
+  if (status.is_ok()) status = sync_directory(dbname);
 
   if (status.is_ok()) status = iter->status();
 

@@ -35,6 +35,9 @@ ambar::Status status = db->get(ambar::ReadOptions(), "key", &value);
   whatever happens — inherited from the atomicity of a single log record rather
   than implemented separately.
 * **Crash recovery.** Reopening replays the write-ahead log and the manifest.
+  A write acknowledged with `sync` survives a power cut, and a sequence of
+  writes without it survives as a prefix -- tested against a simulated disk
+  that loses what was not synced, not only asserted.
 * **Concurrent reads and writes.** One writer at a time, any number of
   readers, and compaction running alongside both, with no lock held across I/O.
 * **One process at a time.** Opening a directory that another process already
@@ -101,6 +104,20 @@ whose declared lengths summed to zero in 32-bit arithmetic and then copied four
 gigabytes out of a fifteen-byte block. Found by an adversarial review that
 forged files rather than damaging real ones.
 
+**The prefix promise was broken at every log rotation.** Without `sync`, the
+contract is that recovery yields some prefix of the acknowledged writes. When
+the memtable filled, the engine closed the old log and opened a new one, and
+synced nothing until the memtable had been written out as a table; a `sync`
+write into the new log made that file durable and nothing else. A power cut in
+the window kept the new log's writes and lost the old log's unsynced tail:
+later writes present, earlier ones gone. No process-kill test can see this,
+because the kernel keeps both tails, and every `fsync` in the code was where
+inspection said it should be. Found in the first minute of running the engine
+on a simulated disk that loses unsynced writes -- along with a second, smaller
+one: a new log's name was never synced, which Linux filesystems forgive and
+POSIX does not. Both fixed, and `mutations/powercut.json` now removes the
+engine's syncs one at a time to show that each removal is caught.
+
 **A single failed `fsync` could make a database permanently unopenable.** When
 a manifest write failed, compaction deleted the output files it had just
 written — but the record naming them had already reached the file, so the
@@ -151,7 +168,7 @@ options removed, the missing test written, the fault-injection harness added to
     cmake --build build
     ./build/ambar_tests
 
-189 tests, no external framework. Also:
+204 tests, no external framework. Also:
 
     cmake -S . -B build-asan -DAMBAR_SANITIZE=address   # ASan + UBSan
     cmake -S . -B build-tsan -DAMBAR_SANITIZE=thread    # ThreadSanitizer
@@ -168,6 +185,15 @@ was never written. Rounds accumulate, so each one recovers from a database that
 a previous crash left behind.
 
     ./build/ambar_crash_test /tmp/crash run 20
+
+**Power cuts.** The engine's whole view of the disk is one small interface,
+and the tests replace it with a disk that keeps what `fsync` covered and loses
+a random amount of the rest -- pages of zeros, pages of garbage, a name that
+never landed. A few hundred cuts run on every platform in the unit suite; this
+runs as many as asked, under whichever filesystem model, and keeps the disk a
+failure left for `ambar_repair` and a hex editor.
+
+    ./build/ambar_powercut --dirents posix --tails holes --seeds 8 --cycles 300
 
 **Mutation testing.** A green suite says the tests pass. It does not say they
 would fail if the code were wrong, and those are different claims.
@@ -226,10 +252,10 @@ each. Repair rebuilds a database but not the history behind it: a key deleted
 before the damage can come back if a stale pre-compaction file survived, and
 `docs/DESIGN.md` says exactly when.
 
-The `sync=true` durability guarantee rests on the `fsync` calls being correct
-by inspection, not by test: `SIGKILL` leaves everything the kernel has, so a
-process-kill test cannot tell a database that calls `fsync` from one that never
-does. Checking it needs the storage to lose writes.
+The `sync=true` guarantee is tested against a simulated disk, not a real one:
+whether `fsync` on a given platform reaches the platter, and whether a
+filesystem in writeback mode hands a new log the intact records of a deleted
+one, are outside what the simulation can see, and `docs/DESIGN.md` says so.
 
 Write amplification — the number a reader most wants beside the write
 throughput — is not measured either. `docs/BENCHMARKS.md` reports space

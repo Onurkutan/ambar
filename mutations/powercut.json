@@ -1,0 +1,85 @@
+{
+  "_comment": "Every fsync the durability contract rests on, removed one at a time, and the ordering that makes the fsyncs mean something. tools/crash_test cannot see any of these -- a killed process leaves the page cache intact -- which is why mutations/durability.json used to list the first as expected to survive. tests/test_powercut.cpp runs the engine on a disk that loses unsynced writes, so tools/mutate.py catches them all.",
+
+  "write(): never sync the log, even when asked": [
+    "src/db_impl.cpp",
+    "        status = options.sync ? log_->sync() : log_->flush();",
+    "        status = log_->flush();"
+  ],
+  "rotation: retire the old log without syncing it": [
+    "src/db_impl.cpp",
+    "      status = log_->sync();\n      if (status.is_ok()) status = sync_directory(dbname_);",
+    "      status = sync_directory(dbname_);"
+  ],
+  "rotation: create the new log without syncing the directory": [
+    "src/db_impl.cpp",
+    "      if (status.is_ok()) status = sync_directory(dbname_);\n      lock.lock();",
+    "      lock.lock();"
+  ],
+  "open: create the first log without syncing the directory": [
+    "src/db_impl.cpp",
+    "    if (status.is_ok()) status = sync_directory(name);\n    if (status.is_ok()) {\n      edit.set_log_number(new_log_number);",
+    "    if (status.is_ok()) {\n      edit.set_log_number(new_log_number);"
+  ],
+  "flush: install a table that was never synced": [
+    "src/builder.cpp",
+    "  if (status.is_ok()) status = file->sync();",
+    "  if (status.is_ok()) status = file->flush();"
+  ],
+  "flush: install a table whose name was never synced": [
+    "src/builder.cpp",
+    "  if (status.is_ok()) status = sync_directory(dbname);",
+    "  ;"
+  ],
+  "compaction: install an output that was never synced": [
+    "src/db_impl.cpp",
+    "  if (status.is_ok()) status = compact->outfile->sync();",
+    "  if (status.is_ok()) status = compact->outfile->flush();"
+  ],
+  "compaction: install an output whose name was never synced": [
+    "src/db_impl.cpp",
+    "  if (status.is_ok()) status = sync_directory(dbname_);\n\n  if (status.is_ok() && entries > 0) {",
+    "\n  if (status.is_ok() && entries > 0) {"
+  ],
+  "repair: write merged tables that were never synced": [
+    "src/repair.cpp",
+    "      meta.file_size = builder->file_size();\n      status = file->sync();",
+    "      meta.file_size = builder->file_size();\n      status = file->flush();"
+  ],
+  "manifest: never sync an edit": [
+    "src/version_set.cpp",
+    "      if (status.is_ok()) status = descriptor_log_->sync();",
+    "      if (status.is_ok()) status = descriptor_log_->flush();"
+  ],
+  "new_db: never sync the first manifest": [
+    "src/db_impl.cpp",
+    "    if (status.is_ok()) status = log.sync();",
+    "    if (status.is_ok()) status = log.flush();"
+  ],
+  "CURRENT: rename the temp file before its contents are on the disk": [
+    "src/filename.cpp",
+    "    if (status.is_ok()) status = file->sync();",
+    "    if (status.is_ok()) status = file->flush();"
+  ],
+  "compact_memtable: retire the log one number too early": [
+    "src/db_impl.cpp",
+    "    edit.set_log_number(logfile_number_);\n    status = versions_->log_and_apply(&edit, &mutex_);",
+    "    edit.set_log_number(logfile_number_ + 1);\n    status = versions_->log_and_apply(&edit, &mutex_);"
+  ],
+  "recovery: number new writes below the ones replayed from the log": [
+    "src/db_impl.cpp",
+    "    versions_->set_last_sequence(max_sequence);",
+    "    ;"
+  ],
+
+  "EXPECTED TO SURVIVE -- CURRENT: skip the directory sync after the rename": [
+    "src/filename.cpp",
+    "    status = sync_directory(dbname);",
+    "    status = Status::ok();"
+  ],
+  "EXPECTED TO SURVIVE -- repair: never sync the manifest it writes": [
+    "src/repair.cpp",
+    "    if (status.is_ok()) status = log.sync();",
+    "    if (status.is_ok()) status = log.flush();"
+  ]
+}

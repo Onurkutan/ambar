@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <filesystem>
 #include <vector>
 
 #include "builder.hpp"
@@ -52,18 +51,21 @@ Options sanitize_options(const std::string& dbname, const Options& source,
 }
 
 // How many table and log files a directory holds: the files that carry data,
-// as opposed to the manifest, lock and info log that only describe it.
-int count_data_files(const std::string& dbname) {
-  int count = 0;
-  std::error_code ec;
-  for (const auto& entry : std::filesystem::directory_iterator(dbname, ec)) {
+// as opposed to the manifest, lock and info log that only describe it.  A
+// directory that cannot be listed is an error, not an empty one: the caller
+// is deciding whether to create a database over what is there.
+Status count_data_files(const std::string& dbname, int* count) {
+  *count = 0;
+  std::vector<std::string> names;
+  Status status = list_directory(dbname, &names);
+  if (!status.is_ok()) return status;
+  for (const std::string& name : names) {
     uint64_t number = 0;
     FileType type;
-    const std::string name = entry.path().filename().string();
     if (!parse_file_name(name, &number, &type)) continue;
-    if (type == FileType::kTable || type == FileType::kLog) ++count;
+    if (type == FileType::kTable || type == FileType::kLog) ++*count;
   }
-  return count;
+  return Status::ok();
 }
 
 }  // namespace
@@ -210,7 +212,9 @@ Status DBImpl::recover(VersionEdit* edit, bool* save_manifest) {
     // different shape: what new_db leaves when it dies before writing
     // CURRENT.  That directory is still empty in every way that matters, and
     // is still created over.
-    const int data_files = count_data_files(dbname_);
+    int data_files = 0;
+    status = count_data_files(dbname_, &data_files);
+    if (!status.is_ok()) return status;
     if (data_files > 0) {
       return Status::corruption(
           "'" + dbname_ + "' has no CURRENT file but holds " +
@@ -239,11 +243,12 @@ Status DBImpl::recover(VersionEdit* edit, bool* save_manifest) {
   versions_->add_live_files(&expected);
 
   std::vector<uint64_t> logs;
-  std::error_code ec;
-  for (const auto& entry : std::filesystem::directory_iterator(dbname_, ec)) {
+  std::vector<std::string> names;
+  status = list_directory(dbname_, &names);
+  if (!status.is_ok()) return status;
+  for (const std::string& name : names) {
     uint64_t number = 0;
     FileType type;
-    const std::string name = entry.path().filename().string();
     if (!parse_file_name(name, &number, &type)) continue;
     expected.erase(number);
     if (type == FileType::kLog && (number >= min_log || number == prev_log)) {
@@ -390,6 +395,9 @@ Status DB::open(const Options& options, const std::string& name,
     std::unique_ptr<WritableFile> file;
     status = WritableFile::open(log_file_name(name, new_log_number),
                                 /*append=*/false, &file);
+    // The directory entry as well as the file: a synced write into a log
+    // whose name never reached the disk is a synced write into nothing.
+    if (status.is_ok()) status = sync_directory(name);
     if (status.is_ok()) {
       edit.set_log_number(new_log_number);
       impl->logfile_number_ = new_log_number;
@@ -427,8 +435,7 @@ Status DB::open(const Options& options, const std::string& name,
 }
 
 Status destroy_db(const std::string& name, const Options&) {
-  std::error_code ec;
-  if (!std::filesystem::exists(name, ec)) return Status::ok();
+  if (!file_exists(name)) return Status::ok();
 
   // The lock is taken first, and held for the whole operation.
   //
@@ -440,18 +447,18 @@ Status destroy_db(const std::string& name, const Options&) {
   Status status = FileLock::acquire(lock_file_name(name), &lock);
   if (!status.is_ok()) return status;
 
-  Status result;
-  for (const auto& entry : std::filesystem::directory_iterator(name, ec)) {
+  std::vector<std::string> names;
+  Status result = list_directory(name, &names);
+  for (const std::string& base : names) {
     uint64_t number = 0;
     FileType type;
-    const std::string base = entry.path().filename().string();
     // Only files this engine recognises are removed.  The directory may not be
     // exclusively ours, and deleting something unrecognised on the strength of
     // a guess is not recoverable.
     if (!parse_file_name(base, &number, &type)) continue;
     if (type == FileType::kLock) continue;
 
-    const Status removed = remove_file(entry.path().string());
+    const Status removed = remove_file(name + "/" + base);
     if (result.is_ok() && !removed.is_ok()) result = removed;
   }
 
@@ -461,7 +468,7 @@ Status destroy_db(const std::string& name, const Options&) {
   lock.reset();
   remove_file(lock_file_name(name));
 
-  std::filesystem::remove(name, ec);  // succeeds only if it is now empty
+  remove_directory(name);  // succeeds only if it is now empty
   return result;
 }
 
@@ -671,6 +678,37 @@ Status DBImpl::make_room_for_write(bool force) {
     std::unique_ptr<WritableFile> file;
     status = WritableFile::open(log_file_name(dbname_, new_log_number),
                                 /*append=*/false, &file);
+    if (status.is_ok()) {
+      // Two syncs before the new log takes over, with the lock released
+      // because each waits on the device: this thread is at the front of
+      // the writer queue, so no other write can slip in between.
+      //
+      // The old log is synced whether or not anything asked for it.  The
+      // contract for unsynced writes is a prefix: a later batch is never
+      // there when an earlier one is missing.  A sync in the new log covers
+      // only the new log, so without this the old log's unsynced tail could
+      // vanish in a power cut while the new log's synced batches survived
+      // -- later writes present, earlier ones gone.  The power-cut
+      // simulation found it in its first minute.  Once per rotation, so
+      // once per write_buffer_size of writes, and not on the path of any
+      // single write.
+      //
+      // The directory is synced so the new log's name is on the disk
+      // before the first synced write into it is acknowledged.
+      lock.unlock();
+      status = log_->sync();
+      if (status.is_ok()) status = sync_directory(dbname_);
+      lock.lock();
+      if (!status.is_ok()) {
+        // The same treatment as a failed sync in write(): the old log may
+        // now have a hole that a retried fsync would not report, so the
+        // memtable and the log disagree and every later write must fail
+        // with the reason.  The new log holds nothing and is removed.
+        record_background_error(status);
+        file.reset();
+        remove_file(log_file_name(dbname_, new_log_number));
+      }
+    }
     if (!status.is_ok()) {
       versions_->reuse_file_number(new_log_number);
       break;
@@ -1147,6 +1185,10 @@ Status DBImpl::finish_compaction_output_file(CompactionState* compact,
   if (status.is_ok()) status = compact->outfile->sync();
   if (status.is_ok()) status = compact->outfile->close();
   compact->outfile.reset();
+  // And its directory entry, which fsync of the file does not promise to
+  // cover: a manifest that names a table whose name never reached the disk
+  // is a database that refuses to open.
+  if (status.is_ok()) status = sync_directory(dbname_);
 
   if (status.is_ok() && entries > 0) {
     std::unique_ptr<Iterator> check(table_cache_->new_iterator(
@@ -1309,12 +1351,12 @@ void DBImpl::remove_obsolete_files() {
   std::set<uint64_t> live = pending_outputs_;
   versions_->add_live_files(&live);
 
-  std::error_code ec;
+  std::vector<std::string> names;
+  if (!list_directory(dbname_, &names).is_ok()) return;
   std::vector<std::string> to_delete;
-  for (const auto& entry : std::filesystem::directory_iterator(dbname_, ec)) {
+  for (const std::string& base : names) {
     uint64_t number = 0;
     FileType type;
-    const std::string base = entry.path().filename().string();
     if (!parse_file_name(base, &number, &type)) continue;
 
     bool keep = true;
@@ -1340,7 +1382,7 @@ void DBImpl::remove_obsolete_files() {
     }
     if (!keep) {
       if (type == FileType::kTable) table_cache_->evict(number);
-      to_delete.push_back(entry.path().string());
+      to_delete.push_back(dbname_ + "/" + base);
     }
   }
 
@@ -1373,21 +1415,27 @@ void DBImpl::compact_range(const std::string_view* begin,
   }
 
   // The memtable first, so that its contents take part in the compaction
-  // rather than being left behind in memory.
+  // rather than being left behind in memory.  As a write with nothing in
+  // it, through the writer queue: the rotation releases the mutex around
+  // its syncs on the strength of being the only writer, and only the front
+  // of the queue is that.  Calling make_room_for_write from here with the
+  // mutex alone used to be a race against a writer using the log with the
+  // mutex released; with the syncs it became two rotations at once.
+  bool has_data = false;
   {
-    std::unique_lock<std::mutex> lock(mutex_);
-    if (mem_ != nullptr && mem_->approximate_memory_usage() > 0) {
-      // With the lock held: make_room_for_write expects it, and releases it
-      // itself around anything slow.
-      const Status status = make_room_for_write(/*force=*/true);
-      if (!status.is_ok()) {
-        // compact_range returns void, so there is nowhere to report this to
-        // the caller.  Recording it makes every subsequent write fail with the
-        // real reason instead of the failure being swallowed entirely and the
-        // compaction proceeding over a memtable that was never flushed.
-        record_background_error(status);
-        return;
-      }
+    std::lock_guard<std::mutex> lock(mutex_);
+    has_data = mem_ != nullptr && mem_->approximate_memory_usage() > 0;
+  }
+  if (has_data) {
+    const Status status = write(WriteOptions(), nullptr);
+    if (!status.is_ok()) {
+      // compact_range returns void, so there is nowhere to report this to
+      // the caller.  Recording it makes every subsequent write fail with the
+      // real reason instead of the failure being swallowed entirely and the
+      // compaction proceeding over a memtable that was never flushed.
+      std::lock_guard<std::mutex> lock(mutex_);
+      record_background_error(status);
+      return;
     }
   }
   wait_for_background_work();
