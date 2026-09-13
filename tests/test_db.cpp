@@ -871,17 +871,18 @@ TEST(db, a_second_process_cannot_open_the_same_database) {
 
 // The manifest CURRENT points at must survive every open.
 //
-// The bug: when recovery reused an existing manifest, it set the "next
-// manifest number" to a *new* number rather than the one it had reused. The
-// cleanup deletes any manifest below that number, so it deleted the live one.
-// The database ran fine for as long as the process lived, and then refused to
-// open, with every table file intact.
+// The bug: when recovery reused an existing manifest -- which it did, once,
+// while a manifest was small -- it set the "next manifest number" to a *new*
+// number rather than the one it had reused. The cleanup deletes any manifest
+// below that number, so it deleted the live one. The database ran fine for as
+// long as the process lived, and then refused to open, with every table file
+// intact. Every open writes a fresh manifest now, and the property still has
+// to hold: whatever CURRENT names after a session must be on disk.
 TEST(db, cleanup_never_deletes_the_manifest_current_names) {
   TempDir dir;
   const std::string path = dir.file("db");
 
-  // Several sessions, because the bug needed a *reuse* of an existing
-  // manifest, which only happens on the second and later opens.
+  // Several sessions, because the bug needed the second and later opens.
   for (int session = 0; session < 6; ++session) {
     std::unique_ptr<DB> db;
     if (!open_db(test_options(), path, &db, "session")) {

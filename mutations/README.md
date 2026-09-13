@@ -9,6 +9,7 @@ pass; it does not say they would notice a bug, and those are different claims.
     python3 tools/mutate.py mutations/write_batch.json
     python3 tools/mutate.py mutations/recovery.json
     python3 tools/mutate.py mutations/powercut.json
+    python3 tools/mutate.py mutations/faults.json
 
 Each mutation is applied to the source, the project is rebuilt, the unit suite
 is run, and the script reports which tests noticed. The original file is
@@ -62,10 +63,13 @@ argument is re-run rather than remembered.
 
 ## The other direction: failure injection
 
-`tools/mutate.py` breaks the code. `tools/fault_sweep.sh` breaks the *machine*
-— it makes one `fsync` or `rename` return `EIO`, at each point in a workload
-where one occurs, and checks the database still opens and still holds
-everything it acknowledged:
+`tools/mutate.py` breaks the code. `tests/test_faults.cpp` breaks the *disk*
+— it makes one I/O call of each kind fail, at each point in a workload where
+one occurs, and checks the database reports it, still holds everything it
+acknowledged, and opens again; `faults.json` then breaks each of the error
+paths that makes that true, to show the sweep would notice.
+`tools/fault_sweep.sh` is the older form of the same thing through the real
+system calls, on Linux:
 
     ./tools/fault_sweep.sh build 3
 

@@ -93,8 +93,7 @@ void random_cuts(Model m, uint64_t seed, int cycles, bool syncing = true) {
   // The workload has to reach the places a cut is interesting: a log
   // rotation, a flush, a compaction that deletes its inputs.  Sizes that
   // stop it reaching them would hollow the test out without turning it
-  // red.  (A fresh manifest, and so a CURRENT rewrite, follows a manifest
-  // whose tail was torn; the sweep below counts those.)
+  // red.
   CHECK(fs.count("create .log") >= 3);
   CHECK(fs.count("create .sst") >= 3);
   CHECK(fs.count("remove .sst") >= 1);
@@ -382,7 +381,6 @@ TEST(powercut, a_cut_at_every_point_of_a_short_life) {
                         SimFileSystem::Tails::kOrdered);
   std::mt19937 rng(23);
   int points = 0;
-  uint64_t fresh_manifests = 0;  // a manifest whose tail was torn is replaced
   for (uint64_t at = 0; at < 520; at += (at < 120 ? 1 : 9)) {
     ++points;
     Driver driver(m, 100 + at);
@@ -394,11 +392,8 @@ TEST(powercut, a_cut_at_every_point_of_a_short_life) {
       CHECK(failure.ok());
       return;
     }
-    fresh_manifests += driver.fs().count("create MANIFEST") - 1;
   }
-  std::printf("    %d cut points; %llu fresh manifests\n", points,
-              static_cast<unsigned long long>(fresh_manifests));
-  CHECK(fresh_manifests >= 2);
+  std::printf("    %d cut points\n", points);
 }
 
 // A cut inside the open that follows a cut: recovery writes a table from

@@ -150,6 +150,10 @@ Status set_current_file(const std::string& dbname,
     // And the directory itself, so the rename survives a power cut.
     status = sync_directory(dbname);
   }
+  // On failure the temp file is removed, and CURRENT names either the old
+  // manifest or the new one: the new one if only the directory sync failed.
+  // A caller that would remove the new manifest on failure has to look at
+  // CURRENT first (VersionSet::log_and_apply does).
   if (!status.is_ok()) {
     remove_file(temp);
   }

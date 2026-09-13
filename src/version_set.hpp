@@ -168,7 +168,11 @@ class VersionSet {
   // the caller guarantees by holding the write lock.
   Status log_and_apply(VersionEdit* edit, std::mutex* mutex);
 
-  Status recover(bool* save_manifest);
+  // Replays the manifest CURRENT names.  The first log_and_apply after this
+  // writes a fresh manifest and points CURRENT at it: the old one is never
+  // appended to (see the comment in the implementation for why), so the
+  // caller always has an edit to apply.
+  Status recover();
 
   Version* current() const { return current_; }
 

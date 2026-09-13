@@ -229,8 +229,10 @@ The cuts landed in the first minute, before any mutation was tried:
   created a moment earlier was durable in a file whose directory entry was not.
   On Linux filesystems `fsync` of a new file happens to carry its name; POSIX
   says nothing of the kind, and the stricter setting of the simulator lost the
-  batch. The directory is now synced after every log and table is created,
-  before anything depends on the name.
+  batch. The directory is now synced after every table is created and after
+  every log a rotation creates, before anything depends on the name; the
+  log an open creates is covered by the directory sync that installs the
+  fresh manifest, which comes before any write.
 
 The mutations in `mutations/powercut.json` remove the engine's syncs one at a
 time — the log's, a table's, a compaction output's, the manifest's,
@@ -273,6 +275,37 @@ that are not reclaimed until a clean restart. That is the right side to err on:
 `remove_obsolete_files` declines to run at all while a background error is
 outstanding, because with the manifest in an unknown state a file that looks
 unreferenced may be the only copy of data a reopen will name.
+
+That sweep failed one kind of call at a time, on Linux, through `LD_PRELOAD`.
+`tests/test_faults.cpp` fails every kind the engine makes — append, flush,
+sync, close, create, rename, remove, directory sync — at every point of a
+workload, on the simulated disk, on every platform, and then cuts the power
+as well. The disk's model of a failed `fsync` is ext4's: the error is
+reported once per open file, the pages that could not be written are marked
+clean and stay readable, and no later `fsync` writes them, so the bytes that
+were unsynced when the call failed can never become durable. Two more things
+came out of it, on the first run:
+
+* **The manifest was reused across opens.** A small manifest used to be
+  appended to at the next open rather than replaced. After an `fsync` of it
+  had failed, the record whose sync failed was in the file the next process
+  read — the page cache had it — and would never be on the disk; appending
+  after it made a hole that nothing could see until the power went, and then
+  the manifest read as damaged in the middle. Every open now writes a fresh
+  manifest from a snapshot, into fresh pages the process syncs itself, and
+  leaves the old one for cleanup. One snapshot per open is the cost.
+* **One failed directory sync made the database unopenable.** `CURRENT` is
+  replaced by rename and then the directory is synced. When the sync failed,
+  the rename had already happened, and the caller's failure path removed the
+  new manifest — the one `CURRENT` now named. The failure path now looks at
+  `CURRENT` before removing anything.
+
+`mutations/faults.json` breaks each of the error paths in turn — deleting
+compaction outputs on a failed install, removing the manifest `CURRENT`
+names, carrying on after a failed log write, carrying on after a failed sync
+at rotation, cleaning up with an error outstanding — and every one is
+caught. The manifest reuse cannot be put back by a mutation, since the code
+that did it is gone.
 
 Two further things the engine does not promise, stated rather than glossed:
 
@@ -585,6 +618,9 @@ which file it sits in.
   disk that loses unsynced writes, in this process, on every platform. Missing
   `fsync`s are invisible to the crash test and obvious to this one; it found
   two, described under *Durability* above.
+* `tests/test_faults.cpp` — one I/O call of each kind failing at every point
+  of a workload on the same disk, then the power cut as well. Found the two
+  described under *After an I/O error* above.
 * `tools/bench` — throughput and latency for sequential and random workloads,
   with and without `sync`, reported as percentiles because an average hides
   what compaction does to the tail. It measures **space** amplification —
@@ -592,10 +628,11 @@ which file it sits in.
   would need counting at the point each file is written, which the engine does
   not yet expose. Compared against SQLite in WAL mode where it is available.
 * `tools/fault_sweep.sh` with `tools/fault_inject.c` — makes one `fsync` or
-  `rename` return `EIO`, at each point in a workload where one occurs, and
-  checks the database still opens and still holds what it acknowledged. A crash
-  test lands somewhere random; this visits the rare instant deliberately. It
-  found the compaction-output rule described under *Durability* above.
+  `rename` return `EIO`, at each point in a workload where one occurs, through
+  the real system calls, and checks the database still opens and still holds
+  what it acknowledged. It found the compaction-output rule described under
+  *Durability* above; `tests/test_faults.cpp` does the same for every kind of
+  call, and this is kept for the real syscall path.
 * `tools/mutate.py` with `mutations/` — breaks the code on purpose, one defect
   at a time, and reports which tests notice. A green suite says the tests pass;
   this says they would fail if the code were wrong, which is a different claim.

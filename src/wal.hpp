@@ -48,9 +48,9 @@ enum class RecordType : uint8_t {
 
 class LogWriter {
  public:
-  // `dest` is taken over.  `initial_offset` lets an existing log be reopened
-  // and appended to without breaking its block alignment.
-  LogWriter(std::unique_ptr<WritableFile> dest, uint64_t initial_offset = 0);
+  // `dest` is taken over, and is written from its beginning: nothing in the
+  // engine appends to a log or a manifest that already exists.
+  explicit LogWriter(std::unique_ptr<WritableFile> dest);
 
   // Appends one logical record, fragmenting it across blocks if needed.
   //

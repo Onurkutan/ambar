@@ -67,7 +67,12 @@ class SimWritableFile final : public WritableFile {
     if (closed_) return Status::io_error("append to closed file " + path_);
     if (!alive()) return power_off("append to", path_);
     Status status = fs_->begin_operation("append", path_);
-    if (!status.is_ok()) return status;
+    if (!status.is_ok()) {
+      // fwrite that fails discards the stream's buffer along with the
+      // bytes it was given; so does a failed fflush, below.
+      if (fs_->powered_) pending_.clear();
+      return status;
+    }
     pending_.append(data.data(), data.size());
     while (pending_.size() >= kUserBuffer) {
       file_->kernel.append(pending_, 0, kUserBuffer);
@@ -81,7 +86,10 @@ class SimWritableFile final : public WritableFile {
     if (closed_) return Status::ok();
     if (!alive()) return power_off("flush", path_);
     Status status = fs_->begin_operation("flush", path_);
-    if (!status.is_ok()) return status;
+    if (!status.is_ok()) {
+      if (fs_->powered_) pending_.clear();
+      return status;
+    }
     file_->kernel += pending_;
     pending_.clear();
     return Status::ok();
@@ -91,10 +99,19 @@ class SimWritableFile final : public WritableFile {
     std::lock_guard<std::mutex> lock(fs_->mutex_);
     if (closed_) return Status::ok();
     if (!alive()) return power_off("sync", path_);
-    Status status = fs_->begin_operation("sync", path_);
-    if (!status.is_ok()) return status;
+    // The flush inside a sync comes first, as in the real one, so a sync
+    // that fails has still handed its bytes to the kernel.
     file_->kernel += pending_;
     pending_.clear();
+    Status status = fs_->begin_operation("sync", path_);
+    if (!status.is_ok()) {
+      if (fs_->powered_ && file_->durable < file_->kernel.size()) {
+        // A failed fsync: the dirty pages are marked clean and stay in the
+        // cache, readable, and nothing will ever write them.
+        file_->lost.emplace_back(file_->durable, file_->kernel.size());
+      }
+      return status;
+    }
     file_->durable = file_->kernel.size();
     file_->before.reset();  // the truncation, if any, is on the disk now
     if (fs_->model_.dirents == SimFileSystem::Dirents::kFile) {
@@ -108,7 +125,15 @@ class SimWritableFile final : public WritableFile {
     if (closed_) return Status::ok();
     if (!alive()) return power_off("close", path_);
     Status status = fs_->begin_operation("close", path_);
-    if (!status.is_ok()) return status;
+    if (!status.is_ok()) {
+      // fclose that fails still closes the stream, and whatever it had not
+      // flushed is gone with it.
+      if (fs_->powered_) {
+        closed_ = true;
+        pending_.clear();
+      }
+      return status;
+    }
     file_->kernel += pending_;
     pending_.clear();
     closed_ = true;
@@ -232,6 +257,18 @@ uint64_t SimFileSystem::count(const std::string& what) const {
   return it == counts_.end() ? 0 : it->second;
 }
 
+std::map<std::string, uint64_t> SimFileSystem::counts() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return counts_;
+}
+
+void SimFileSystem::forget() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  cut_at_.clear();
+  cut_report_.clear();
+  last_fault_.clear();
+}
+
 void SimFileSystem::crash_at(uint64_t index) {
   std::lock_guard<std::mutex> lock(mutex_);
   crash_at_ = index;
@@ -242,6 +279,27 @@ void SimFileSystem::crash() {
   if (!powered_) return;
   cut_at_ = "the end of the workload";
   cut();
+}
+
+void SimFileSystem::fail_at(uint64_t index) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  fail_at_ = index;
+}
+
+void SimFileSystem::fail_at(const std::string& kind, uint64_t ordinal) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  fail_kind_ = kind;
+  fail_ordinal_ = ordinal;
+}
+
+void SimFileSystem::crash_after_fault(uint64_t operations) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  crash_after_fault_ = operations;
+}
+
+uint64_t SimFileSystem::faults() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return faults_;
 }
 
 bool SimFileSystem::powered() const {
@@ -287,9 +345,26 @@ Status SimFileSystem::begin_operation(const char* what,
     cut();
     return power_off(what, path);
   }
+  const std::string key =
+      directory ? std::string(what) : std::string(what) + " " + kind_of(path);
+  const bool by_kind = key == fail_kind_ && counts_[key] == fail_ordinal_;
+  if (operations_ == fail_at_ || by_kind) {
+    last_fault_ = key + " " + path + " (operation " +
+                  std::to_string(operations_) + ", ordinal " +
+                  std::to_string(counts_[key]) + " of its kind)";
+    fail_at_ = kNever;
+    fail_kind_.clear();
+    ++faults_;
+    ++operations_;
+    if (crash_after_fault_ != kNever) {
+      crash_at_ = operations_ + crash_after_fault_;
+      crash_after_fault_ = kNever;
+    }
+    return Status::io_error(std::string("injected fault: cannot ") + what +
+                            " '" + path + "'");
+  }
   ++operations_;
-  ++counts_[directory ? std::string(what)
-                      : std::string(what) + " " + kind_of(path)];
+  ++counts_[key];
   return Status::ok();
 }
 
@@ -389,10 +464,12 @@ void SimFileSystem::cut() {
                         " pending name change(s) landed");
   for (const auto& [path, file] : tree.files) {
     const std::string* kernel = &file->kernel;
+    const std::vector<std::pair<uint64_t, uint64_t>>* lost = &file->lost;
     uint64_t synced = file->durable;
     const bool old = file->before && (rng() & 1) != 0;
     if (old) {
       kernel = &file->before->kernel;
+      lost = &file->before->lost;
       synced = file->before->durable;
     }
     const uint64_t size = kernel->size();
@@ -417,6 +494,20 @@ void SimFileSystem::cut() {
               model_.tails == Tails::kHoles ? '\0'
                                             : static_cast<char>(rng() & 0xff);
         }
+      }
+    }
+    for (const auto& [from, to] : *lost) {
+      const uint64_t stop = std::min<uint64_t>(to, content.size());
+      if (from >= stop) continue;
+      cut_report_.push_back("  " + path + ": " +
+                            std::to_string(stop - from) +
+                            " bytes a failed sync never wrote read as " +
+                            (model_.tails == Tails::kGarbage ? "garbage"
+                                                             : "zeros"));
+      for (uint64_t i = from; i < stop; ++i) {
+        content[static_cast<size_t>(i)] =
+            model_.tails == Tails::kGarbage ? static_cast<char>(rng() & 0xff)
+                                            : '\0';
       }
     }
     auto survivor = std::make_shared<File>();
@@ -451,10 +542,11 @@ Status SimFileSystem::new_writable_file(const std::string& path, bool append,
       Status status = begin_operation("truncate", path);
       if (!status.is_ok()) return status;
       if (!file->before) {
-        file->before = File::Before{file->kernel, file->durable};
+        file->before = File::Before{file->kernel, file->durable, file->lost};
       }
       file->kernel.clear();
       file->durable = 0;
+      file->lost.clear();
     }
   } else {
     Status status = begin_operation("create", path);
@@ -671,6 +763,7 @@ std::vector<std::string> SimFileSystem::describe() const {
                   std::to_string(pending_.size()) +
                   " name change(s) not yet committed; operation " +
                   std::to_string(operations_));
+  if (!last_fault_.empty()) lines.push_back("last fault at " + last_fault_);
   if (!cut_at_.empty()) {
     lines.push_back("last cut at " + cut_at_);
     for (const std::string& line : cut_report_) lines.push_back("  " + line);

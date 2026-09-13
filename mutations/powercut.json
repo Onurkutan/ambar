@@ -16,11 +16,6 @@
     "      if (status.is_ok()) status = sync_directory(dbname_);\n      lock.lock();",
     "      lock.lock();"
   ],
-  "open: create the first log without syncing the directory": [
-    "src/db_impl.cpp",
-    "    if (status.is_ok()) status = sync_directory(name);\n    if (status.is_ok()) {\n      edit.set_log_number(new_log_number);",
-    "    if (status.is_ok()) {\n      edit.set_log_number(new_log_number);"
-  ],
   "flush: install a table that was never synced": [
     "src/builder.cpp",
     "  if (status.is_ok()) status = file->sync();",

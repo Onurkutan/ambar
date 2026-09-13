@@ -118,6 +118,17 @@ one: a new log's name was never synced, which Linux filesystems forgive and
 POSIX does not. Both fixed, and `mutations/powercut.json` now removes the
 engine's syncs one at a time to show that each removal is caught.
 
+**A manifest that had once failed to sync was appended to, and read as
+damaged after the next power cut.** After an `fsync` fails, ext4 reports it
+once per open file, marks the pages it could not write as clean, and never
+writes them; the data stays readable from the page cache. The next open read the manifest from
+that cache, saw a record that would never be on the disk, and appended after
+it — a hole no one could see until the power went. Found by failing one call
+of each kind at every point of a workload on the simulated disk. The manifest
+is now rewritten fresh at every open, and a sibling finding from the same
+sweep — a failed directory sync after the `CURRENT` rename made the caller
+delete the manifest `CURRENT` had just been pointed at — is fixed beside it.
+
 **A single failed `fsync` could make a database permanently unopenable.** When
 a manifest write failed, compaction deleted the output files it had just
 written — but the record naming them had already reached the file, so the
@@ -168,7 +179,7 @@ options removed, the missing test written, the fault-injection harness added to
     cmake --build build
     ./build/ambar_tests
 
-204 tests, no external framework. Also:
+211 tests, no external framework. Also:
 
     cmake -S . -B build-asan -DAMBAR_SANITIZE=address   # ASan + UBSan
     cmake -S . -B build-tsan -DAMBAR_SANITIZE=thread    # ThreadSanitizer
@@ -207,10 +218,13 @@ surviving mutation turned out to be genuinely equivalent rather than a missing
 test — recorded in `mutations/README.md` so the next person does not go looking
 for a test that should not exist.
 
-**Failure injection.** Makes one `fsync` or `rename` return `EIO`, at each
-point in a workload where one occurs, and checks the database still opens and
-still holds everything it acknowledged. A crash test lands somewhere random;
-this visits the rare instant deliberately.
+**Failure injection.** One I/O call of each kind — append, sync, close,
+create, rename, remove, directory sync — fails at every point of a workload
+on the simulated disk, then the power goes as well; the database has to
+report the error, keep what it acknowledged, and open again. In the unit
+suite on every platform, and in `ambar_powercut --faults 50`. The original
+form, one `fsync` or `rename` returning `EIO` through the real system calls
+under `LD_PRELOAD`, is kept for the real syscall path:
 
     ./tools/fault_sweep.sh build 3
 

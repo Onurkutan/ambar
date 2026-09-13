@@ -60,7 +60,7 @@ class DBImpl final : public DB {
                      const std::string_view* end) override;
 
   // Called by DB::open.
-  Status recover(VersionEdit* edit, bool* save_manifest);
+  Status recover(VersionEdit* edit);
 
   // Waits for any in-flight compaction to finish.  Used by tests, and by
   // compact_range.
@@ -73,8 +73,8 @@ class DBImpl final : public DB {
   struct CompactionState;
 
   Status new_db();
-  Status recover_log_file(uint64_t log_number, bool last_log, bool* save_manifest,
-                          VersionEdit* edit, SequenceNumber* max_sequence);
+  Status recover_log_file(uint64_t log_number, VersionEdit* edit,
+                          SequenceNumber* max_sequence);
 
   // Makes room for a write, flushing or waiting as needed.  Called with the
   // lock held; may release and reacquire it.

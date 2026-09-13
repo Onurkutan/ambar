@@ -9,8 +9,8 @@
 
 namespace ambar {
 
-LogWriter::LogWriter(std::unique_ptr<WritableFile> dest, uint64_t initial_offset)
-    : dest_(std::move(dest)), offset_(initial_offset % kBlockSize) {}
+LogWriter::LogWriter(std::unique_ptr<WritableFile> dest)
+    : dest_(std::move(dest)) {}
 
 Status LogWriter::add_record(std::string_view payload) {
   const char* data = payload.data();

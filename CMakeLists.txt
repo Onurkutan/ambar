@@ -112,6 +112,7 @@ add_executable(ambar_tests
   tests/test_corrupt.cpp
   tests/test_repair.cpp
   tests/test_powercut.cpp
+  tests/test_faults.cpp
   tests/sim_file_system.cpp
 )
 target_link_libraries(ambar_tests PRIVATE ambar Threads::Threads)

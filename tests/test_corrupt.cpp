@@ -386,8 +386,9 @@ TEST(corrupt, damage_in_the_middle_of_the_manifest_is_refused_not_rolled_back) {
 // What must not happen next is appending to that file.  The reader stops at
 // the torn record every time, so an edit written after it is unreadable at the
 // next open, and once intact records follow the tear it reads as damage and
-// is refused.  Recovery writes a fresh manifest instead and leaves the torn
-// one to be cleaned up.
+// is refused.  Recovery writes a fresh manifest instead -- as it does at
+// every open, see VersionSet::recover -- and leaves the torn one to be
+// cleaned up.
 TEST(corrupt, a_torn_manifest_tail_is_tolerated_and_the_file_is_not_reused) {
   TempDir dir;
   const std::string path = dir.file("db");

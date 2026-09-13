@@ -1,0 +1,29 @@
+{
+  "_comment": "What the engine does after one I/O call fails: the error paths, each broken in turn. tests/test_faults.cpp fails one call at every point of a workload, on the simulated disk, and then cuts the power as well; tools/mutate.py runs it like any other set. The first entry is the defect tools/fault_sweep.sh found with LD_PRELOAD in 2026; the second is one of the two the in-process sweep found on its first run (the other, the manifest being reused across opens, is code that no longer exists and cannot be put back by a mutation).",
+
+  "compaction: delete the outputs when the install fails": [
+    "src/db_impl.cpp",
+    "    for (const auto& output : compact->outputs) {\n      pending_outputs_.erase(output.number);\n    }\n    compaction->release_inputs();",
+    "    for (const auto& output : compact->outputs) {\n      pending_outputs_.erase(output.number);\n      if (!status.is_ok()) {\n        remove_file(table_file_name(dbname_, output.number));\n      }\n    }\n    compaction->release_inputs();"
+  ],
+  "log_and_apply: remove the new manifest even when CURRENT names it": [
+    "src/version_set.cpp",
+    "      if (names_another) remove_file(new_manifest);",
+    "      (void)names_another;\n      remove_file(new_manifest);"
+  ],
+  "write(): carry on after a failed log write": [
+    "src/db_impl.cpp",
+    "      record_background_error(status);\n    }\n  }\n\n  // Report to everyone whose batch was included.",
+    "      ;\n    }\n  }\n\n  // Report to everyone whose batch was included."
+  ],
+  "rotation: carry on after the old log's sync fails": [
+    "src/db_impl.cpp",
+    "        record_background_error(status);\n        file.reset();\n        remove_file(log_file_name(dbname_, new_log_number));",
+    "        file.reset();\n        remove_file(log_file_name(dbname_, new_log_number));"
+  ],
+  "cleanup: run while a background error is outstanding": [
+    "src/db_impl.cpp",
+    "  if (!background_error_.is_ok()) {\n    // The set of live files cannot be trusted while an error is outstanding:",
+    "  if (false) {\n    // The set of live files cannot be trusted while an error is outstanding:"
+  ]
+}

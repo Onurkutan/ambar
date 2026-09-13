@@ -65,16 +65,30 @@
 //            file that exists.)
 //
 //   Not modelled: a disk that lies about fsync; damage to synced bytes; a
-//   file overwritten in place, which the engine never does; and the
-//   particular garbage that is a deleted file's bytes -- a writeback-mode
-//   filesystem can extend a log over blocks that still hold intact records
-//   of the log it replaced, which is the one state that could make the
-//   engine replay old records as new rather than refuse.
+//   file overwritten in place, which the engine never does; the eviction of
+//   the pages a failed sync left clean, after which a read returns what is
+//   on the disk with no cut at all; and the particular garbage that is a
+//   deleted file's bytes -- a writeback-mode filesystem can extend a log
+//   over blocks that still hold intact records of the log it replaced,
+//   which is the one state that could make the engine replay old records
+//   as new rather than refuse.
 //
 // After the cut every operation fails with "power is off" until power_on(),
 // which makes the surviving state the live state -- as a reboot would --
-// and releases the lock the dead process held.  tests/powercut_driver.hpp
-// drives it.
+// and releases the lock the dead process held.
+//
+// The other thing a disk does is refuse one call.  fail_at() makes the
+// operation at an index return an error instead of happening: a rename
+// that did not rename, a create that made nothing.  What stdio does around
+// a failure is kept too: a failed append or flush drops what the process
+// had buffered, as glibc and the Windows runtime do, and a failed close
+// still closes.  A failed sync is the interesting one, and it is modelled
+// the way ext4 behaves: the error is reported once per open file, the
+// pages it could not write are marked clean and stay readable, and no later
+// sync will write them -- so the bytes that were unsynced when the sync
+// failed can never become durable, and a cut afterwards loses them however
+// many syncs succeeded since.  (The sync's own flush comes first and does
+// succeed, as in the real one.)  tests/powercut_driver.hpp drives both.
 #pragma once
 
 #include <cstdint>
@@ -126,6 +140,28 @@ class SimFileSystem final : public FileSystem {
   // Cuts the power now.
   void crash();
 
+  // Makes operation `index` fail with an I/O error, once, without the
+  // power going anywhere; the operation does not happen.  kNever cancels.
+  void fail_at(uint64_t index);
+
+  // The same for the operation of a kind -- "sync MANIFEST", "rename
+  // CURRENT", "sync directory", as count() names them -- that would have
+  // been the `ordinal`-th to succeed, counting from zero and from the start
+  // of the simulation: fail_at("sync MANIFEST", 2) fails the third sync of
+  // the manifest, and the next sync of the manifest after that is the third
+  // again, since a failed call is not counted.  So every sync of the
+  // manifest can be failed in turn, whatever else moves around it.  An
+  // empty kind cancels.
+  void fail_at(const std::string& kind, uint64_t ordinal);
+
+  // Cuts the power `operations` operations after the next fault fires,
+  // which is how a cut is placed relative to a fault whose own position is
+  // known only by kind.  kNever cancels.
+  void crash_after_fault(uint64_t operations);
+
+  // How many operations have been failed this way.
+  uint64_t faults() const;
+
   bool powered() const;
 
   // Restores power.  What survived the cut is the whole disk from here on.
@@ -138,8 +174,14 @@ class SimFileSystem final : public FileSystem {
 
   // One line per file -- path, size, how much of it was synced -- and,
   // after a cut, what each file had at the instant of the cut and how much
-  // of its unsynced tail was kept, which is what a failure needs.
+  // of its unsynced tail was kept, which is what a failure needs; and the
+  // last call made to fail.  forget() clears the report of the cut and the
+  // fault, so that a later description is about later events.
   std::vector<std::string> describe() const;
+  void forget();
+
+  // Every count() at once.
+  std::map<std::string, uint64_t> counts() const;
 
   // FileSystem.
   Status new_writable_file(const std::string& path, bool append,
@@ -171,11 +213,15 @@ class SimFileSystem final : public FileSystem {
   struct File {
     std::string kernel;    // what the kernel has, and what reads return
     uint64_t durable = 0;  // the prefix fsync has covered
+    // Ranges a failed sync could not write and no later sync will: still
+    // readable, never durable.
+    std::vector<std::pair<uint64_t, uint64_t>> lost;
     // Set by a truncating open of a file that existed: what the file held
     // before, until the truncation lands with the next sync.
     struct Before {
       std::string kernel;
       uint64_t durable = 0;
+      std::vector<std::pair<uint64_t, uint64_t>> lost;
     };
     std::optional<Before> before;
   };
@@ -214,10 +260,16 @@ class SimFileSystem final : public FileSystem {
   std::map<std::string, uint64_t> counts_;
   uint64_t operations_ = 0;
   uint64_t crash_at_ = kNever;
+  uint64_t fail_at_ = kNever;
+  std::string fail_kind_;
+  uint64_t fail_ordinal_ = 0;
+  uint64_t crash_after_fault_ = kNever;
+  uint64_t faults_ = 0;
   uint64_t crashes_ = 0;
   uint64_t generation_ = 0;  // bumped by power_on, so stale handles stay dead
   bool powered_ = true;
   std::string cut_at_;  // the operation the cut landed on
+  std::string last_fault_;  // the operation last made to fail
   std::vector<std::string> cut_report_;  // what each file kept at the cut
   Tree survived_;       // the durable tree, computed at the cut
 };

@@ -184,7 +184,7 @@ Status DBImpl::new_db() {
   return status;
 }
 
-Status DBImpl::recover(VersionEdit* edit, bool* save_manifest) {
+Status DBImpl::recover(VersionEdit* edit) {
   Status status = create_directory(dbname_);
   if (!status.is_ok()) return status;
 
@@ -230,7 +230,7 @@ Status DBImpl::recover(VersionEdit* edit, bool* save_manifest) {
                                     "' and error_if_exists is true");
   }
 
-  status = versions_->recover(save_manifest);
+  status = versions_->recover();
   if (!status.is_ok()) return status;
 
   // Every log file newer than the one the manifest names is replayed.  There
@@ -269,8 +269,7 @@ Status DBImpl::recover(VersionEdit* edit, bool* save_manifest) {
   std::sort(logs.begin(), logs.end());
   SequenceNumber max_sequence = 0;
   for (size_t i = 0; i < logs.size(); ++i) {
-    status = recover_log_file(logs[i], i == logs.size() - 1, save_manifest,
-                              edit, &max_sequence);
+    status = recover_log_file(logs[i], edit, &max_sequence);
     if (!status.is_ok()) return status;
     versions_->mark_file_number_used(logs[i]);
   }
@@ -281,8 +280,7 @@ Status DBImpl::recover(VersionEdit* edit, bool* save_manifest) {
   return Status::ok();
 }
 
-Status DBImpl::recover_log_file(uint64_t log_number, bool last_log,
-                                bool* save_manifest, VersionEdit* edit,
+Status DBImpl::recover_log_file(uint64_t log_number, VersionEdit* edit,
                                 SequenceNumber* max_sequence) {
   const std::string path = log_file_name(dbname_, log_number);
   std::unique_ptr<SequentialFile> file;
@@ -296,7 +294,6 @@ Status DBImpl::recover_log_file(uint64_t log_number, bool last_log,
 
   LogReader reader(std::move(file));
   MemTable* mem = nullptr;
-  int batches = 0;
 
   std::string_view record;
   std::string scratch;
@@ -316,7 +313,6 @@ Status DBImpl::recover_log_file(uint64_t log_number, bool last_log,
     }
     status = WriteBatchInternal::insert_into(batch, mem);
     if (!status.is_ok()) break;
-    ++batches;
 
     // count == 0 is a legal, empty batch -- header only, no records -- that a
     // hand-written or damaged log can contain.  count(batch) - 1 would wrap a
@@ -332,7 +328,6 @@ Status DBImpl::recover_log_file(uint64_t log_number, bool last_log,
       // The log held more than one memtable's worth, so it becomes more than
       // one table file.  Writing them out as we go keeps recovery's memory
       // bounded by write_buffer_size rather than by the size of the log.
-      *save_manifest = true;
       status = write_level0_table(mem, edit, nullptr);
       mem->unref();
       mem = nullptr;
@@ -369,13 +364,10 @@ Status DBImpl::recover_log_file(uint64_t log_number, bool last_log,
     // merely wrong, it is *below* the log number already in the manifest, so a
     // later recovery would replay logs that have already been folded in.
     // Flushing is one write at open and no special case anywhere else.
-    *save_manifest = true;
     status = write_level0_table(mem, edit, nullptr);
   }
-  (void)last_log;
 
   if (mem != nullptr) mem->unref();
-  (void)batches;
   return status;
 }
 
@@ -385,38 +377,37 @@ Status DB::open(const Options& options, const std::string& name,
 
   auto impl = std::make_unique<DBImpl>(options, name);
   VersionEdit edit;
-  bool save_manifest = false;
 
   std::unique_lock<std::mutex> lock(impl->mutex_);
-  Status status = impl->recover(&edit, &save_manifest);
+  Status status = impl->recover(&edit);
 
   if (status.is_ok() && impl->mem_ == nullptr) {
     const uint64_t new_log_number = impl->versions_->new_file_number();
     std::unique_ptr<WritableFile> file;
     status = WritableFile::open(log_file_name(name, new_log_number),
                                 /*append=*/false, &file);
-    // The directory entry as well as the file: a synced write into a log
-    // whose name never reached the disk is a synced write into nothing.
-    if (status.is_ok()) status = sync_directory(name);
+    // The log's name reaches the disk with the directory sync that installs
+    // the fresh manifest below, before any write can be acknowledged into
+    // it; a rotation, which installs nothing, syncs the directory itself.
     if (status.is_ok()) {
       edit.set_log_number(new_log_number);
       impl->logfile_number_ = new_log_number;
       impl->log_ = std::make_unique<LogWriter>(std::move(file));
       impl->mem_ = new MemTable();
       impl->mem_->ref();
-
-      // A new log means the manifest has to be told about it, whatever
-      // recovery decided.  Skipping this when recovery reused the manifest and
-      // found nothing to replay leaves log_number at its old value, so every
-      // previous log is kept forever and re-read at every open — one leaked
-      // file per open, and a replay that grows without bound.  Recovery stays
-      // correct either way, because a stale-low log number over-replays rather
-      // than under-replays, which is why nothing else notices.
-      save_manifest = true;
     }
   }
 
-  if (status.is_ok() && save_manifest) {
+  // The edit that records the open: the tables recovery wrote from the logs
+  // and the new log's number.  It is always written, into a fresh manifest
+  // (see VersionSet::recover).  When the manifest used to be reused, it was
+  // once skipped if nothing had been replayed, which left the log number at
+  // its old value: every previous log was kept forever and re-read at every
+  // open -- one leaked file per open, and a replay that grew without bound.
+  // Recovery stayed correct throughout, because a stale-low log number
+  // over-replays rather than under-replays, which is why nothing else
+  // noticed.
+  if (status.is_ok()) {
     edit.set_prev_log_number(0);
     edit.set_log_number(impl->logfile_number_);
     status = impl->versions_->log_and_apply(&edit, &impl->mutex_);

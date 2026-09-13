@@ -13,6 +13,9 @@
 namespace ambar {
 namespace {
 
+// Defined below, with recovery; used by log_and_apply's failure path.
+Status read_current(const std::string& dbname, std::string* manifest);
+
 // The size at which a level is considered full.
 //
 // Ten megabytes at level 1, ten times that at each level below.  The first
@@ -639,11 +642,24 @@ Status VersionSet::log_and_apply(VersionEdit* edit, std::mutex* mutex) {
   } else {
     delete version;
     if (!new_manifest.empty()) {
-      // The half-written manifest is removed rather than left: CURRENT still
-      // names the old one, so this file is unreferenced, and leaving it would
-      // accumulate a manifest per failed install.
       descriptor_log_.reset();
-      remove_file(new_manifest);
+      // The half-written manifest is removed only when CURRENT can be read
+      // and names another one.  set_current_file can fail after its rename,
+      // at the directory sync that makes the rename durable, and then
+      // CURRENT already names this file: removing it would leave a database
+      // that refuses to open, permanently, over one failed fsync of a
+      // directory -- the fault sweep in tests/test_faults.cpp found exactly
+      // that.  And when CURRENT cannot be read at all, the file is kept too:
+      // keeping a stray manifest costs nothing, since the next open takes
+      // the same number from the manifest CURRENT names and writes over it,
+      // while removing the one CURRENT names loses the database.  This is
+      // the first edit of the process (every later one finds the manifest
+      // open), so nothing retries it on this object; DB::open fails and
+      // the next open starts again from CURRENT.
+      std::string named;
+      const bool names_another = read_current(dbname_, &named).is_ok() &&
+                                 dbname_ + "/" + named != new_manifest;
+      if (names_another) remove_file(new_manifest);
     }
   }
   return status;
@@ -805,7 +821,7 @@ Status read_current(const std::string& dbname, std::string* manifest) {
 
 }  // namespace
 
-Status VersionSet::recover(bool* save_manifest) {
+Status VersionSet::recover() {
   std::string manifest_base;
   Status status = read_current(dbname_, &manifest_base);
   if (!status.is_ok()) return status;
@@ -828,15 +844,12 @@ Status VersionSet::recover(bool* save_manifest) {
   uint64_t prev_log_number = 0;
 
   Builder builder(this, current_);
-  int records = 0;
-  bool torn = false;
 
   {
     LogReader reader(std::move(file));
     std::string_view record;
     std::string scratch;
     while (reader.read_record(&record, &scratch) && status.is_ok()) {
-      ++records;
       VersionEdit edit;
       status = edit.decode_from(record);
       if (!status.is_ok()) break;
@@ -888,17 +901,14 @@ Status VersionSet::recover(bool* save_manifest) {
           "they name");
     }
 
-    if (status.is_ok() && reader.truncated()) {
-      // A manifest whose tail was lost is not fatal.  Every record before the
-      // damage is a complete edit, and the state they describe is a state the
-      // database really was in; the edits after it never became durable, so
-      // nothing referenced them.  Recovery stops there and carries on -- but
-      // not in this file: see `torn` below.
-      //
-      // What *is* fatal is a manifest with no usable records at all, which the
-      // checks below catch.
-      torn = true;
-    }
+    // A manifest whose tail was lost (reader.truncated()) is not fatal.
+    // Every record before the damage is a complete edit, and the state they
+    // describe is a state the database really was in; the edits after it
+    // never became durable, so nothing referenced them.  Recovery stops
+    // there and carries on -- in a fresh manifest, as it always does.
+    //
+    // What *is* fatal is a manifest with no usable records at all, which the
+    // checks below catch.
   }
 
   if (status.is_ok()) {
@@ -921,51 +931,43 @@ Status VersionSet::recover(bool* save_manifest) {
   finalize(version);
   append_version(version);
 
+  // The fresh manifest takes the next file number the old one recorded,
+  // which every writer of a manifest keeps above the manifest's own number.
+  // Held to here as well, where it is relied on: a number at or below the
+  // old manifest's would open the file CURRENT names for writing and
+  // truncate it before the fresh contents were on the disk.
+  uint64_t own_number = 0;
+  FileType own_type;
+  if (parse_file_name(manifest_base, &own_number, &own_type) &&
+      next_file <= own_number) {
+    next_file = own_number + 1;
+  }
   next_file_number_ = next_file + 1;
   last_sequence_ = last_sequence;
   log_number_ = log_number;
   prev_log_number_ = prev_log_number;
 
-  // A manifest that is still small is appended to rather than replaced, so an
-  // open does not rewrite the whole state every time.
+  // The manifest is never appended to across opens: the first edit of this
+  // process writes a fresh one from a snapshot and points CURRENT at it,
+  // and the old one is left for cleanup.  It used to be reused while it
+  // was small, and two things ruled that out.  A torn tail: appending
+  // would put every later edit behind the torn record, where the reader
+  // stops, so the database would come back without them and delete the
+  // tables they name.  And a sync that failed in the process before this
+  // one: on ext4 an fsync error is reported once per open file, the pages
+  // it could not write are marked clean and stay readable, and no later
+  // fsync writes them -- so the record whose sync failed is in the file
+  // this process reads and will never be on the disk, and appending after
+  // it makes a hole nobody can see until the power goes.  A fresh file has
+  // fresh pages, which this process syncs itself.  The cost is one snapshot
+  // per open.
   //
-  // manifest_file_number_ is what remove_obsolete_files compares against when
-  // deciding which manifests are dead, so it must name the file CURRENT points
-  // at.  Setting it to the *next* file number here -- which is what a new
-  // manifest would take -- makes the live manifest look obsolete, and the
-  // first cleanup after open deletes the file the database needs to reopen.
-  // The database survives until the process exits and then will not open at
-  // all, with every table file intact.
-  uint64_t reused_number = 0;
-  FileType reused_type;
-  const bool parsed =
-      parse_file_name(manifest_base, &reused_number, &reused_type) &&
-      reused_type == FileType::kDescriptor;
-
-  // A torn tail rules reuse out as well.  Appending would put every later
-  // edit behind the torn record, where the reader stops: unreadable at the
-  // next open, so the database would come back without them -- and would
-  // delete the tables they name.  A fresh manifest is written from a
-  // snapshot instead, and the torn one is left behind for cleanup.
-  uint64_t size = 0;
-  if (!torn && parsed && file_size(manifest_path, &size).is_ok() &&
-      size <= options_.max_file_size) {
-    std::unique_ptr<WritableFile> appendable;
-    if (WritableFile::open(manifest_path, /*append=*/true, &appendable).is_ok()) {
-      descriptor_log_ = std::make_unique<LogWriter>(std::move(appendable), size);
-      manifest_file_number_ = reused_number;
-      mark_file_number_used(reused_number);
-      *save_manifest = false;
-      (void)records;
-      return Status::ok();
-    }
-  }
-
-  // Not reusing: a new manifest will be written, and it takes the number
-  // reserved above.  The old one stays live until CURRENT has been repointed.
+  // manifest_file_number_ is what remove_obsolete_files compares against
+  // when deciding which manifests are dead, so it must name a file that is
+  // live: the new manifest's number, reserved above, which stays above the
+  // old one's.  Setting it wrong once deleted the manifest CURRENT named,
+  // and the database would not open again with every table intact.
   manifest_file_number_ = next_file;
-  *save_manifest = true;
-  (void)records;
   return Status::ok();
 }
 

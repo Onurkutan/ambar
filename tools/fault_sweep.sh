@@ -8,6 +8,10 @@
 # every fsync of the manifest in turn, so the rare instant that breaks the
 # database is visited deliberately rather than waited for.
 #
+# tests/test_faults.cpp does the same for every kind of call, on every
+# platform, on the simulated disk, and cuts the power afterwards too.  This
+# is kept because it goes through the real system calls.
+#
 # Usage:  tools/fault_sweep.sh [build-dir] [seeds]
 #
 set -u
