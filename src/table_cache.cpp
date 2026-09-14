@@ -2,12 +2,42 @@
 
 #include "table_cache.hpp"
 
+#include <atomic>
 #include <functional>
 #include <utility>
 
 #include "filename.hpp"
 
 namespace ambar {
+
+namespace {
+
+// Counts what goes through it.  One more virtual call per block read,
+// beside the syscall it counts; a read that failed brought nothing in and
+// is not counted, which is also how the simulated disk in tests/ counts.
+class CountingFile final : public RandomAccessFile {
+ public:
+  CountingFile(std::unique_ptr<RandomAccessFile> inner,
+               std::atomic<uint64_t>* reads, std::atomic<uint64_t>* bytes)
+      : inner_(std::move(inner)), reads_(reads), bytes_(bytes) {}
+
+  Status read(uint64_t offset, size_t n, std::string_view* result,
+              char* scratch) const override {
+    const Status status = inner_->read(offset, n, result, scratch);
+    if (status.is_ok()) {
+      reads_->fetch_add(1, std::memory_order_relaxed);
+      bytes_->fetch_add(n, std::memory_order_relaxed);
+    }
+    return status;
+  }
+
+ private:
+  const std::unique_ptr<RandomAccessFile> inner_;
+  std::atomic<uint64_t>* const reads_;
+  std::atomic<uint64_t>* const bytes_;
+};
+
+}  // namespace
 
 TableCache::TableCache(std::string dbname, const Options& options,
                        const Comparator* comparator, int entries)
@@ -36,10 +66,12 @@ Status TableCache::find(uint64_t file_number, uint64_t file_size,
   // racing to open the same file both succeed and one of the two Table objects
   // is dropped, which wastes an open and keeps the lock short.
   auto entry = std::make_unique<Entry>();
-  std::unique_ptr<RandomAccessFile> file;
+  std::unique_ptr<RandomAccessFile> opened;
   Status status = RandomAccessFile::open(table_file_name(dbname_, file_number),
-                                         &file);
+                                         &opened);
   if (!status.is_ok()) return status;
+  std::unique_ptr<RandomAccessFile> file = std::make_unique<CountingFile>(
+      std::move(opened), &reads_, &bytes_read_);
 
   std::unique_ptr<Table> table;
   status = Table::open(options_, comparator_, file.get(), file_size, &table);

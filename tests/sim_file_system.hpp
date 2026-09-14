@@ -137,6 +137,12 @@ class SimFileSystem final : public FileSystem {
   // the engine cannot see it.
   uint64_t bytes_appended(const std::string& kind) const;
 
+  // Reads served from files of a kind, and the bytes they returned; a read
+  // that failed served nothing and is not counted.  The engine's count of
+  // its table reads is checked against this.
+  uint64_t reads(const std::string& kind) const;
+  uint64_t bytes_read(const std::string& kind) const;
+
   // Cuts the power just before operation `index` happens -- when the
   // counter equals it exactly, so an index already passed never fires --
   // and the operation itself does not.  kNever cancels.
@@ -265,6 +271,8 @@ class SimFileSystem final : public FileSystem {
   std::set<std::string> locked_;
   std::map<std::string, uint64_t> counts_;
   std::map<std::string, uint64_t> bytes_;  // appended, by kind of file
+  std::map<std::string, uint64_t> reads_;  // reads served, by kind of file
+  std::map<std::string, uint64_t> bytes_read_;
   uint64_t operations_ = 0;
   uint64_t crash_at_ = kNever;
   uint64_t fail_at_ = kNever;

@@ -1,5 +1,5 @@
 {
-  "_comment": "The write-amplification count: each writer the engine tallies, left out in turn. tests/test_stats.cpp checks the engine's count of what it wrote against the simulated disk's count of what was appended, by kind of file, so a writer that stops counting is a mismatch rather than a smaller number nobody questions. The per-level split in ambar.stats is the same counters again by level and is not checked separately.",
+  "_comment": "The amplification counts: each writer the engine tallies, and each half of the table-read count and the wrapper that feeds it, left out in turn. tests/test_stats.cpp checks the engine's counts of what it wrote and what it read against the simulated disk's counts of what was appended and what was served, by kind of file, so a counter that stops moving is a mismatch rather than a smaller number nobody questions. The per-level split in ambar.stats is the same counters again by level and is not checked separately.",
 
   "log: count the record's payload and not its header": [
     "src/wal.cpp",
@@ -30,5 +30,20 @@
     "src/version_set.cpp",
     "    manifest_bytes_ += descriptor_log_->bytes_written() - manifest_before;",
     "    (void)manifest_before;"
+  ],
+  "table reads: leave the count unmoved": [
+    "src/table_cache.cpp",
+    "      reads_->fetch_add(1, std::memory_order_relaxed);",
+    "      ;"
+  ],
+  "table reads: leave the bytes unmoved": [
+    "src/table_cache.cpp",
+    "      bytes_->fetch_add(n, std::memory_order_relaxed);",
+    "      ;"
+  ],
+  "table cache: hand the table its file unwrapped": [
+    "src/table_cache.cpp",
+    "  std::unique_ptr<RandomAccessFile> file = std::make_unique<CountingFile>(\n      std::move(opened), &reads_, &bytes_read_);",
+    "  std::unique_ptr<RandomAccessFile> file = std::move(opened);"
   ]
 }

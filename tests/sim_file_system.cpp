@@ -175,6 +175,8 @@ class SimSequentialFile final : public SequentialFile {
     scratch->assign(file_->kernel, position_, count);
     position_ += count;
     *result = std::string_view(*scratch);
+    ++fs_->reads_[SimFileSystem::kind_of(path_)];
+    fs_->bytes_read_[SimFileSystem::kind_of(path_)] += count;
     return Status::ok();
   }
 
@@ -212,6 +214,8 @@ class SimRandomAccessFile final : public RandomAccessFile {
     }
     std::memcpy(scratch, file_->kernel.data() + offset, n);
     *result = std::string_view(scratch, n);
+    ++fs_->reads_[SimFileSystem::kind_of(path_)];
+    fs_->bytes_read_[SimFileSystem::kind_of(path_)] += n;
     return Status::ok();
   }
 
@@ -262,6 +266,18 @@ uint64_t SimFileSystem::bytes_appended(const std::string& kind) const {
   std::lock_guard<std::mutex> lock(mutex_);
   const auto it = bytes_.find(kind);
   return it == bytes_.end() ? 0 : it->second;
+}
+
+uint64_t SimFileSystem::reads(const std::string& kind) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto it = reads_.find(kind);
+  return it == reads_.end() ? 0 : it->second;
+}
+
+uint64_t SimFileSystem::bytes_read(const std::string& kind) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto it = bytes_read_.find(kind);
+  return it == bytes_read_.end() ? 0 : it->second;
 }
 
 std::map<std::string, uint64_t> SimFileSystem::counts() const {

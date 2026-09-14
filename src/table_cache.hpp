@@ -16,6 +16,7 @@
 #ifndef AMBAR_TABLE_CACHE_HPP_
 #define AMBAR_TABLE_CACHE_HPP_
 
+#include <atomic>
 #include <cstdint>
 #include <list>
 #include <memory>
@@ -57,6 +58,19 @@ class TableCache {
   // held until eviction happens to reach it.
   void evict(uint64_t file_number);
 
+  // Reads of table files since this cache was created -- every data block
+  // the block cache did not answer, and the footer, index and, with a
+  // filter configured, metaindex and filter read when a table is opened --
+  // and the
+  // bytes they brought in.  Every table file the engine reads is opened
+  // here and read through a counting wrapper, so no read can bypass the
+  // count; atomic because reads happen on any thread, under no lock.
+  // Divided by the lookups that caused them, this is read amplification.
+  uint64_t reads() const { return reads_.load(std::memory_order_relaxed); }
+  uint64_t bytes_read() const {
+    return bytes_read_.load(std::memory_order_relaxed);
+  }
+
  private:
   struct Entry {
     std::unique_ptr<RandomAccessFile> file;
@@ -82,6 +96,9 @@ class TableCache {
   // and there is not one yet.
   std::mutex mutex_;
   std::list<uint64_t> lru_;  // front is most recently used
+
+  std::atomic<uint64_t> reads_{0};
+  std::atomic<uint64_t> bytes_read_{0};
   std::unordered_map<uint64_t, std::pair<std::unique_ptr<Entry>,
                                          std::list<uint64_t>::iterator>>
       entries_;

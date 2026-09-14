@@ -1566,6 +1566,17 @@ bool DBImpl::get_property(std::string_view property, std::string* value) {
                   static_cast<double>(versions_->manifest_bytes_written()) /
                       kMB);
     *value += buf;
+    std::snprintf(buf, sizeof(buf),
+                  "read since open: %llu table reads, %.1f MB\n",
+                  static_cast<unsigned long long>(table_cache_->reads()),
+                  static_cast<double>(table_cache_->bytes_read()) / kMB);
+    *value += buf;
+    return true;
+  }
+
+  if (name == "table-reads") {
+    *value = "reads " + std::to_string(table_cache_->reads()) + "\n" +
+             "bytes " + std::to_string(table_cache_->bytes_read()) + "\n";
     return true;
   }
 

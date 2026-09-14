@@ -102,6 +102,15 @@ class DB {
   //                                 compactions), manifest.  Their sum over
   //                                 the bytes of keys and values handed in
   //                                 is the write amplification.
+  //   ambar.table-reads             reads of table files since open, as
+  //                                 "reads N" and "bytes N" lines: every
+  //                                 data block the block cache did not
+  //                                 answer, and the footer, index and,
+  //                                 with a filter configured, metaindex
+  //                                 and filter read when a table is
+  //                                 opened.  Over
+  //                                 the lookups that caused them, the read
+  //                                 amplification.
   //   ambar.sstables                every file, with its key range
   //   ambar.approximate-memory-usage bytes held in memtables
   //   ambar.last-sequence           the newest sequence number assigned, which

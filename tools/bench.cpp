@@ -16,8 +16,8 @@
 // flatters it.  So the bytes the engine writes are counted -- by the engine,
 // at the point each file is written, since a directory listing cannot see a
 // file that was written and deleted between two looks -- and divided by the
-// bytes it was handed.  Read amplification is not measured, and
-// docs/BENCHMARKS.md says so rather than letting one figure stand for both.
+// bytes it was handed; and the reads of table files are counted where the
+// files are opened and divided by the lookups that caused them.
 //
 // It also compares against SQLite, when SQLite is available, because a number
 // with nothing beside it is not a measurement -- it is a number.  The
@@ -75,6 +75,16 @@ std::string key_of(int n) {
   std::snprintf(buf, sizeof(buf), "key_%010d", n);
   return buf;
 }
+
+// A key that is not there, between two that are.  key_of(n) followed by
+// a byte sorts after key_of(n) and before key_of(n + 1), so every level's
+// range check lets it through and the filter is what turns it away.  A key
+// past the end of the database would be rejected by the range check alone,
+// and would measure that check rather than the filter -- which is what the
+// first version of this benchmark did, without knowing it, until the table
+// reads per lookup were counted and came out at 0.00 where the filter's
+// own false-positive rate says 0.01.
+std::string absent_key_of(int n) { return key_of(n) + "-"; }
 
 std::string make_value(int n, int size, std::mt19937* rng) {
   // Half random, half repeated: entirely random data makes compression
@@ -182,6 +192,49 @@ Written bytes_written(DB* db) {
   return out;
 }
 
+// Reads of table files since the database was opened -- what the block
+// cache did not answer -- and the bytes they brought in.
+struct Reads {
+  uint64_t reads = 0;
+  uint64_t bytes = 0;
+};
+
+Reads table_reads(DB* db) {
+  Reads out;
+  std::string text;
+  if (!db->get_property("ambar.table-reads", &text)) return out;
+  std::istringstream lines(text);
+  std::string what;
+  uint64_t n = 0;
+  while (lines >> what >> n) {
+    if (what == "reads") out.reads = n;
+    if (what == "bytes") out.bytes = n;
+  }
+  return out;
+}
+
+// Read amplification of a lookup phase: the table reads it caused and the
+// bytes they brought in, per lookup.
+void report_lookup_reads(const Reads& before, const Reads& after,
+                         size_t lookups) {
+  const double n = static_cast<double>(lookups);
+  std::printf("  %-26s %.2f table reads and %.1f KB from disk per lookup\n",
+              "", static_cast<double>(after.reads - before.reads) / n,
+              static_cast<double>(after.bytes - before.bytes) / 1024.0 / n);
+}
+
+// Read amplification of a scan: bytes read from disk against bytes of key
+// and value the scan returned.
+void report_scan_reads(const Reads& before, const Reads& after,
+                       uint64_t returned) {
+  std::printf("  %-26s %.1f MB read from disk for %.1f MB returned, "
+              "%.2f per byte\n",
+              "", static_cast<double>(after.bytes - before.bytes) / 1048576.0,
+              static_cast<double>(returned) / 1048576.0,
+              static_cast<double>(after.bytes - before.bytes) /
+                  static_cast<double>(returned));
+}
+
 // ------------------------------------------------------------- ambar -------
 
 // Random reads and a repeated scan at one cache size, on a database that is
@@ -196,6 +249,7 @@ void read_curve(DB* db, const Config& config, const char* label) {
   std::string value;
   const int count = std::min(config.keys, 200000);
 
+  const Reads before_reads = table_reads(db);
   const auto start = Clock::now();
   for (int i = 0; i < count; ++i) {
     const int id = static_cast<int>(rng() % static_cast<unsigned>(config.keys));
@@ -204,19 +258,34 @@ void read_curve(DB* db, const Config& config, const char* label) {
     present.add(micros_since(op));
   }
   const double read_seconds = seconds_since(start);
+  const Reads after_reads = table_reads(db);
 
   double scan_rate = 0;
+  double scan_read_per_byte = 0;
   for (int pass = 0; pass < 2; ++pass) {
+    const Reads before_scan = table_reads(db);
     const auto scan_start = Clock::now();
     std::unique_ptr<Iterator> iter(db->new_iterator(ReadOptions()));
     size_t scanned = 0;
-    for (iter->seek_to_first(); iter->valid(); iter->next()) ++scanned;
+    uint64_t returned = 0;
+    for (iter->seek_to_first(); iter->valid(); iter->next()) {
+      ++scanned;
+      returned += iter->key().size() + iter->value().size();
+    }
     scan_rate = static_cast<double>(scanned) / seconds_since(scan_start);
+    const Reads after_scan = table_reads(db);
+    scan_read_per_byte =
+        static_cast<double>(after_scan.bytes - before_scan.bytes) /
+        static_cast<double>(returned);
   }
 
-  std::printf("  %-30s %9.0f read/s  p50 %6.1f us    %9.0f scan/s\n", label,
-              static_cast<double>(count) / read_seconds, present.quantile(0.50),
-              scan_rate);
+  std::printf("  %-30s %9.0f read/s  p50 %6.1f us  %5.2f reads/lookup   "
+              "%9.0f scan/s  %4.2f B read/B\n",
+              label, static_cast<double>(count) / read_seconds,
+              present.quantile(0.50),
+              static_cast<double>(after_reads.reads - before_reads.reads) /
+                  static_cast<double>(count),
+              scan_rate, scan_read_per_byte);
 }
 
 void bench_ambar(const Config& config) {
@@ -317,6 +386,7 @@ void bench_ambar(const Config& config) {
     std::string value;
     const int count = std::min(config.keys, 200000);
     const auto start = Clock::now();
+    const Reads before = table_reads(db.get());
     for (int i = 0; i < count; ++i) {
       const int id = static_cast<int>(rng() % static_cast<unsigned>(config.keys));
       const auto op = Clock::now();
@@ -325,6 +395,8 @@ void bench_ambar(const Config& config) {
     }
     latencies.report("read random (present)", static_cast<size_t>(count),
                      seconds_since(start));
+    report_lookup_reads(before, table_reads(db.get()),
+                        static_cast<size_t>(count));
   }
 
   // -- random reads of keys that do not exist: what the bloom filter is for --
@@ -333,14 +405,17 @@ void bench_ambar(const Config& config) {
     std::string value;
     const int count = std::min(config.keys, 200000);
     const auto start = Clock::now();
+    const Reads before = table_reads(db.get());
     for (int i = 0; i < count; ++i) {
       const auto op = Clock::now();
-      db->get(ReadOptions(), key_of(config.keys + i), &value);
+      db->get(ReadOptions(), absent_key_of(i), &value);
       latencies.add(micros_since(op));
     }
     latencies.report("read random (absent)", static_cast<size_t>(count),
                      seconds_since(start),
                      "the bloom filter answers most of these without a read");
+    report_lookup_reads(before, table_reads(db.get()),
+                        static_cast<size_t>(count));
   }
 
   // -- a full scan over cold blocks --
@@ -348,14 +423,20 @@ void bench_ambar(const Config& config) {
   // What a scan costs when the cache holds nothing useful is the honest
   // default; the curve below shows what a larger cache buys.
   {
+    const Reads before = table_reads(db.get());
     const auto start = Clock::now();
     std::unique_ptr<Iterator> iter(db->new_iterator(ReadOptions()));
     size_t scanned = 0;
-    for (iter->seek_to_first(); iter->valid(); iter->next()) ++scanned;
+    uint64_t returned = 0;
+    for (iter->seek_to_first(); iter->valid(); iter->next()) {
+      ++scanned;
+      returned += iter->key().size() + iter->value().size();
+    }
     const double seconds = seconds_since(start);
     std::printf("  %-26s %9.0f op/s   %zu entries in %.2f s\n",
                 "scan (cold blocks)",
                 static_cast<double>(scanned) / seconds, scanned, seconds);
+    report_scan_reads(before, table_reads(db.get()), returned);
   }
 
   // The read result as a curve, because a single cache size would report
@@ -516,7 +597,7 @@ void bench_sqlite(const Config& config) {
     const int count = std::min(config.keys, 200000);
     const auto start = Clock::now();
     for (int i = 0; i < count; ++i) {
-      const std::string key = key_of(config.keys + i);
+      const std::string key = absent_key_of(i);
       const auto op = Clock::now();
       sqlite3_bind_text(select, 1, key.c_str(), -1, SQLITE_TRANSIENT);
       sqlite3_step(select);

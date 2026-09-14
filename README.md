@@ -158,6 +158,17 @@ status, including the successful ones; it never asked what the successful ones
 had done. The reader now looks past a failure for a record it can verify, and a
 manifest or log that has one is refused with its files intact.
 
+**A benchmark row that measured the wrong thing.** The absent-key lookups —
+the row credited to the Bloom filter, 6.4× SQLite — used keys numbered past
+the last key in the database, and a key past the end of every table is
+rejected by a range check before any table, or its filter, is consulted. The
+row was a binary search over file ranges, and would have read the same with
+no filter at all. Nothing in the rate said so. It was found the day table
+reads per lookup were counted: the phase made 0.00, where a filter with ten
+bits per key lets about one lookup in a hundred through to a block. The
+keys now fall between present ones, and `docs/BENCHMARKS.md` reports what
+the filter actually costs and saves.
+
 **And several claims that were simply wrong.** The design document said, as
 such documents usually do, that the log record must precede the memtable insert
 or a value becomes readable before it is durable. Swapping the two and running
@@ -183,7 +194,7 @@ engine, and the comment says what still is not.
     cmake --build build
     ./build/ambar_tests
 
-214 tests, no external framework. Also:
+216 tests, no external framework. Also:
 
     cmake -S . -B build-asan -DAMBAR_SANITIZE=address   # ASan + UBSan
     cmake -S . -B build-tsan -DAMBAR_SANITIZE=thread    # ThreadSanitizer
@@ -251,16 +262,16 @@ written to the working directory and is, on its own, the whole bug report.
 
     ./build/ambar_bench /tmp/bench --keys 1000000
 
-Throughput and latency as percentiles, and both amplifications kept apart:
+Throughput and latency as percentiles, and three amplifications kept apart:
 write, from the engine's own count of every byte it appended to a log, a
-table or a manifest, against every byte it was handed; and space, the
-settled size on disk against the distinct data. The count is checked rather
-than trusted -- `tests/test_stats.cpp` runs the engine on the simulated disk
-and requires the engine's figure for each kind of file it counts to equal
-the disk's
-own tally, and `mutations/stats.json` removes each writer from the count in
-turn. See `docs/BENCHMARKS.md` for the numbers and what they do and do not
-show.
+table or a manifest, against every byte it was handed; read, from its count
+of every table block the cache did not answer, against the lookups that
+caused them; and space, the settled size on disk against the distinct data.
+The counts are checked rather than trusted -- `tests/test_stats.cpp` runs
+the engine on the simulated disk and requires the engine's figures to equal
+the disk's own tallies of what was appended and what was served, and
+`mutations/stats.json` removes each counter in turn. See `docs/BENCHMARKS.md`
+for the numbers and what they do and do not show.
 
 ## Documentation
 
@@ -284,10 +295,12 @@ whether `fsync` on a given platform reaches the platter, and whether a
 filesystem in writeback mode hands a new log the intact records of a deleted
 one, are outside what the simulation can see, and `docs/DESIGN.md` says so.
 
-Read amplification is not measured. Write amplification is, from the
-engine's own count of the logs, tables and manifests it writes, and
-`docs/BENCHMARKS.md` reports it beside the space amplification that used to
-stand in for it, which is a different quantity.
+Both amplifications are measured from the engine's own counts — write, of
+the logs, tables and manifests it writes; read, of the table blocks the
+cache did not answer — and `docs/BENCHMARKS.md` reports them beside the
+space amplification that used to stand in for the first, which is a
+different quantity. Neither is measured under memory pressure or with a cold
+page cache.
 
 ## Licence
 

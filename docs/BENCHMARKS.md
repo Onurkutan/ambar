@@ -88,18 +88,77 @@ Two things worth noticing rather than smoothing over:
 
 ### Lookups for keys that are not there
 
-| | ambar | sqlite |
+The row that stood here — 2,600,000 lookups a second against SQLite's
+404,000, credited to the Bloom filter — measured something else. The
+benchmark's absent keys were numbered past the last key in the database, and
+a key past the end of every table is rejected by the version's range check
+before any table, or its filter, is consulted. The row was a memtable miss
+and a binary search over file ranges, and it would have read the same with
+no filter configured. Nothing in the rate said so; what said so was counting
+table reads per lookup, once that count existed: the phase made 0.00, where
+a filter with ten bits per key lets about one lookup in a hundred through to
+a block. The absent keys now fall between two present keys, so every level's
+range check lets them through and the filter is what turns them away.
+
+| | present keys | absent keys |
 |---|---|---|
-| absent keys | **2,600,000 op/s** (p50 0.3 µs) | 404,000 op/s (p50 2.2 µs) |
+| ambar, this machine | 64,000 op/s (p50 14.7 µs) | **774,000 op/s** (p50 1.0 µs) |
 
-This is the Bloom filter, and it is the one place the design wins by a wide
-margin rather than a narrow one — 6.4× at the default cache size, where every
-other read result is a loss. `tests/test_table.cpp` measures the mechanism
-directly rather than inferring it from the rate: a thousand lookups for absent
-keys read **13 blocks** with a filter configured and **1,000** without one.
+An absent key is answered twelve times faster than a present one, at the
+cost of a memory probe, which is the win the filter buys. Both figures are
+from one run on the Windows machine of the amplification sections below,
+because the
+Linux figures above were made with the old keys, and so was the SQLite
+comparison. SQLite's absent-key rate has not been re-measured;
+the SQLite side of the benchmark now draws the same in-range keys, so the
+next comparison will be like for like. With the filter an absent key costs
+0.01 table reads per lookup against 0.93 for a present one — the false
+positives, each reading one block — and `tests/test_table.cpp` measures the
+mechanism directly rather than inferring it from a rate: a thousand lookups
+for absent keys read **13 blocks** with a filter configured and **1,000**
+without one.
 
-Note that the filter is opt-in. `Options::filter_policy` defaults to null, and
-with it null this row collapses to roughly the "present keys" rate.
+The filter is opt-in. `Options::filter_policy` defaults to null, and with it
+null an absent key costs a block read at every level it could be in.
+
+## Read amplification
+
+What a lookup costs the disk: the reads of table files that the block cache
+did not answer, per lookup, counted by the engine where it opens the files
+and checked in `tests/test_stats.cpp` against the simulated disk's own count
+of the reads it served.
+
+| block cache | table reads per lookup | bytes read per byte scanned |
+|---|---|---|
+| 1 MB (1 % of the data) | 0.99 | 1.00 |
+| 8 MB (7 %) — the default | 0.93 | 1.00 |
+| 64 MB (58 %) | 0.44 | 1.00 |
+| 256 MB (231 %) | 0.14 | 0.00 |
+
+The lookups are 200,000 random keys out of a million on a freshly opened
+database, as in the reads table above; the scan is the second of two full
+passes. A present key costs one read, of its data block, once the table it
+lives in has been opened: a table's index and filter are held in memory
+from then on, and the levels below zero are disjoint, so the search reads
+no block it can rule out. At the default that is 0.93 reads and 3.8 KB per
+lookup. The curve is the block cache's hit rate — a cache holding 1 % of
+the data answers almost nothing, one holding half answers half, and one
+that holds everything still reads 0.14 blocks per lookup because these
+lookups start cold: each of the database's roughly 27,000 data blocks is
+read the first time a lookup lands in it, 200,000 lookups land in nearly
+all of them, and 27,000 first reads over 200,000 lookups is 0.14. A key
+that is not there costs 0.01 reads per lookup with the filter configured —
+the false positives, each reading a block — which is the Bloom filter row
+above measured from the other side. A cold scan reads 0.99 bytes for each
+byte it returns — the database once, 108.1 MB for 108.7 MB of keys and
+values — and a scan the cache already holds reads nothing.
+
+Measured on the same Windows machine as the write amplification below, and
+like it a ratio of counts rather than a speed, so it transfers where the
+rates above would not. The figures are from one run; they are counts on a freshly opened
+database with a fixed seed, and a second run reproduced every column
+to two decimals. There is no
+SQLite figure beside it for the same reason as there.
 
 ## Space
 
@@ -180,17 +239,15 @@ an MSVC Release build, the same workload — because the Linux container they
 were taken in is no longer available. The ratio transfers where a throughput
 figure would not: it is decided by the sizes of the memtable and the levels
 and by when compaction ran, not by how fast the disk is. Three runs gave
-5.59, 5.65 and 5.70. The log and flush figures were identical in all three
-and only compaction varied, because the background thread's progress against
-the writer decides how many level-0 tables each compaction picks up. There is
+5.59, 5.65 and 5.70, and a later one 5.49. The log and flush figures were
+identical in all of them and only compaction varied, because the background
+thread's progress against the writer decides how many level-0 tables each
+compaction picks up; a run made while the machine was also compiling gave
+6.06, the writer having got that much further ahead. There is
 no SQLite figure beside it: SQLite was not built on that machine, and
 counting what it writes would need a hook of its own.
 
 ## What is not measured
-
-**Read amplification** — the blocks read for each lookup, the other side of
-the levelled trade. `tests/test_table.cpp` counts block reads for one
-specific case (the filter), which is the closest this project comes.
 
 **Anything under memory pressure or with a cold page cache.** Every number here
 was taken with the whole database in the operating system's page cache. Real

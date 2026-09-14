@@ -127,6 +127,18 @@ time. On a workload of misses this turns most levels into a memory probe:
 measured in `tests/test_table.cpp`, a thousand lookups for keys that are not in
 a table read thirteen blocks with a filter and a thousand without one.
 
+What a lookup costs the disk is counted rather than inferred. Every table
+file is opened in `TableCache`, which hands it to the table through a wrapper
+that counts each data block read the block cache did not answer, and the
+footer and index read when the table is opened — and the metaindex and
+filter, when a filter is configured — with the bytes they brought in, on any
+thread and under no lock,
+and reports both through `get_property("ambar.table-reads")`. `tools/bench`
+divides them by the lookups that caused them and calls the quotient read
+amplification; `docs/BENCHMARKS.md` has it at each cache size, and
+`tests/test_stats.cpp` requires the engine's count to equal the simulated
+disk's own count of the reads it served.
+
 The filter summarises **user keys, not the internal keys the table stores**, and
 this is not a detail. A filter built over internal keys knows about `key_42 at
 sequence 1017`; a lookup asks about `key_42 as of the newest snapshot`, which is
@@ -162,8 +174,10 @@ way.
 
 Random-read throughput is bound by how much of the working set is resident, and
 `tools/bench` reports it as a curve rather than a number for that reason — the
-same engine reads at half SQLite's rate with a 1 MB cache and twice its rate
-with the whole database resident.
+same engine reads at less than half SQLite's rate with a 1 MB cache and
+about 1.3 times it with the whole database resident, and the table reads per
+lookup at each cache size, which `docs/BENCHMARKS.md` reports beside it, say
+why.
 
 ## Durability contract
 
@@ -634,16 +648,18 @@ which file it sits in.
 * `tests/test_faults.cpp` — one I/O call of each kind failing at every point
   of a workload on the same disk, then the power cut as well. Found the two
   described under *After an I/O error* above.
-* `tests/test_stats.cpp` — the engine's count of what it wrote, against the
-  simulated disk's count of what was appended, by kind of file. See
-  *Compaction* above for why the count is the engine's to keep.
+* `tests/test_stats.cpp` — the engine's counts of what it wrote and of the
+  table reads it made, against the simulated disk's counts of what was
+  appended and what was served. See *Compaction* and *The read path* above
+  for why the counts are the engine's to keep.
 * `tools/bench` — throughput and latency for sequential and random workloads,
   with and without `sync`, reported as percentiles because an average hides
-  what compaction does to the tail. It reports both amplifications and keeps
-  them apart: **write**, from the engine's own count of the bytes it wrote
-  against the bytes it was handed, and **space**, the settled size on disk
-  against the distinct data it holds. Compared against SQLite in WAL mode
-  where it is available.
+  what compaction does to the tail. It reports three amplifications and
+  keeps them apart: **write**, from the engine's own count of the bytes it
+  wrote against the bytes it was handed; **read**, from its count of the
+  table blocks the cache did not answer against the lookups that caused
+  them; and **space**, the settled size on disk against the distinct data it
+  holds. Compared against SQLite in WAL mode where it is available.
 * `tools/fault_sweep.sh` with `tools/fault_inject.c` — makes one `fsync` or
   `rename` return `EIO`, at each point in a workload where one occurs, through
   the real system calls, and checks the database still opens and still holds

@@ -9,6 +9,9 @@
 // simulated disk's tally of what was appended to files of each kind.
 // tools/bench divides the engine's number by the bytes it handed in; this
 // is what makes the quotient worth printing.
+//
+// Read amplification the same way: every read of a table file, counted by
+// the engine where it opens them and by the disk where it serves them.
 
 #include <cstdio>
 #include <map>
@@ -16,6 +19,7 @@
 #include <string>
 
 #include "ambar/db.hpp"
+#include "ambar/filter_policy.hpp"
 #include "harness.hpp"
 #include "sim_file_system.hpp"
 #include "wal.hpp"
@@ -75,10 +79,10 @@ uint64_t put_keys(DB* db, int first, int count) {
   return handed;
 }
 
-// The property, "log 123\nflush 456\n...", as a map.
-std::map<std::string, uint64_t> bytes_written(DB* db) {
+// A property of "name 123\n" lines, as a map.
+std::map<std::string, uint64_t> lines_of(DB* db, const char* property) {
   std::string text;
-  CHECK(db->get_property("ambar.bytes-written", &text));
+  CHECK(db->get_property(property, &text));
   std::map<std::string, uint64_t> out;
   size_t pos = 0;
   while (pos < text.size()) {
@@ -92,12 +96,22 @@ std::map<std::string, uint64_t> bytes_written(DB* db) {
   return out;
 }
 
+std::map<std::string, uint64_t> bytes_written(DB* db) {
+  return lines_of(db, "ambar.bytes-written");
+}
+
+std::map<std::string, uint64_t> table_reads(DB* db) {
+  return lines_of(db, "ambar.table-reads");
+}
+
 uint64_t at(const std::map<std::string, uint64_t>& written, const char* kind) {
   const auto it = written.find(kind);
   return it == written.end() ? 0 : it->second;
 }
 
-unsigned long long ull(uint64_t n) { return static_cast<unsigned long long>(n); }
+unsigned long long ull(uint64_t n) {
+  return static_cast<unsigned long long>(n);
+}
 
 }  // namespace
 
@@ -176,6 +190,71 @@ TEST(stats, the_log_counts_its_headers_and_padding) {
   // Three bytes of padding, then a header and one byte in the next block.
   CHECK_EQ(log.bytes_written(), uint64_t{kBlockSize + kHeaderSize + 1});
   CHECK_EQ(log.bytes_written(), disk.fs.bytes_appended(".log"));
+}
+
+// The reads, by the same method: every read of a table file -- by a
+// compaction, by the check each new table gets, by a lookup, by a scan --
+// counted by the engine where it opens the file and by the disk where it
+// serves the read, and the two must agree.
+TEST(stats, counts_every_table_read_the_disk_served) {
+  Disk disk;
+  const auto policy = new_bloom_filter_policy(10);
+  Options options = small_options();
+  options.filter_policy = policy.get();
+  std::unique_ptr<DB> db;
+  CHECK_OK(DB::open(options, "sim/db", &db));
+  put_keys(db.get(), 0, 4000);
+  db->compact_range(nullptr, nullptr);
+
+  // Compaction read its inputs, and every output was read back once.
+  const auto compacted = table_reads(db.get());
+  CHECK(at(compacted, "reads") > 0);
+  CHECK_EQ(at(compacted, "reads"), disk.fs.reads(".sst"));
+  CHECK_EQ(at(compacted, "bytes"), disk.fs.bytes_read(".sst"));
+
+  // Then lookups for keys that are there; for keys that are not, placed
+  // between keys that are, so that the range check lets them through and
+  // the filter is what answers them; and a scan over everything.
+  std::string value;
+  for (int i = 0; i < 4000; i += 7) {
+    CHECK_OK(db->get(ReadOptions(), key_of(i), &value));
+  }
+  const uint64_t before_absent = at(table_reads(db.get()), "reads");
+  for (int i = 0; i < 500; ++i) {
+    CHECK(db->get(ReadOptions(), key_of(i * 7) + "-", &value).is_not_found());
+  }
+  // The filter answered nearly all of them: a few false positives read a
+  // block each, against one block for nearly every present key above.
+  const uint64_t absent_reads =
+      at(table_reads(db.get()), "reads") - before_absent;
+  CHECK(absent_reads < 50);
+  {
+    std::unique_ptr<Iterator> iter(db->new_iterator(ReadOptions()));
+    int scanned = 0;
+    for (iter->seek_to_first(); iter->valid(); iter->next()) ++scanned;
+    CHECK_EQ(scanned, 4000);
+  }
+  const auto looked_up = table_reads(db.get());
+  CHECK(at(looked_up, "reads") > at(compacted, "reads"));
+  CHECK_EQ(at(looked_up, "reads"), disk.fs.reads(".sst"));
+  CHECK_EQ(at(looked_up, "bytes"), disk.fs.bytes_read(".sst"));
+}
+
+// A block the cache holds is not read again: the second lookup of a key
+// costs the disk nothing.  That is the whole point of the cache, and the
+// reason the benchmark's read curve moves with its size.
+TEST(stats, a_lookup_the_cache_answers_reads_nothing) {
+  Disk disk;
+  std::unique_ptr<DB> db;
+  CHECK_OK(DB::open(small_options(), "sim/db", &db));
+  put_keys(db.get(), 0, 4000);
+  db->compact_range(nullptr, nullptr);
+
+  std::string value;
+  CHECK_OK(db->get(ReadOptions(), key_of(1234), &value));
+  const uint64_t after_first = at(table_reads(db.get()), "reads");
+  CHECK_OK(db->get(ReadOptions(), key_of(1234), &value));
+  CHECK_EQ(at(table_reads(db.get()), "reads"), after_first);
 }
 
 TEST(stats, counts_what_recovery_writes_and_starts_from_open) {
