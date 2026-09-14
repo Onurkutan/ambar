@@ -447,11 +447,24 @@ level — is cheaper to write and cheaper on writes, but leaves overlapping file
 everywhere and pays for it on every read. Levelled is chosen here because reads
 are the harder promise to keep.
 
-The cost of that choice is write amplification, and **this project does not
-measure it.** `tools/bench` reports space amplification — bytes on disk against
-bytes of user data — which is a different and much easier quantity.
-`docs/BENCHMARKS.md` says so under *What is not measured* rather than letting
-one word stand in for the other.
+The cost of that choice is write amplification: the bytes the engine writes
+for each byte it is handed. The engine counts them itself, at the point each
+file is written — a log record as it is appended, a table as its builder
+finishes, a manifest edit as it lands — and reports the totals through
+`get_property("ambar.bytes-written")`, by kind. The counters themselves move
+under the database mutex once each write has finished, so a reader never
+sees one in motion. Counting there rather than by watching the directory is
+what makes the number honest: a file written and
+deleted between two looks at the directory leaves no trace, and compaction
+does exactly that all day. `tools/bench` divides the total by the bytes it
+handed in, overwrites included, and prints it beside the space amplification
+that used to stand in for it — a different and much easier quantity, which
+`docs/BENCHMARKS.md` keeps apart. The count is checked, not trusted:
+`tests/test_stats.cpp` runs the engine on the simulated disk and requires the
+engine's figure for each kind of file it counts to equal the disk's own
+tally of what
+was appended, and `mutations/stats.json` removes each writer from the count in
+turn to show the check would notice.
 
 ## Backpressure
 
@@ -621,12 +634,16 @@ which file it sits in.
 * `tests/test_faults.cpp` — one I/O call of each kind failing at every point
   of a workload on the same disk, then the power cut as well. Found the two
   described under *After an I/O error* above.
+* `tests/test_stats.cpp` — the engine's count of what it wrote, against the
+  simulated disk's count of what was appended, by kind of file. See
+  *Compaction* above for why the count is the engine's to keep.
 * `tools/bench` — throughput and latency for sequential and random workloads,
   with and without `sync`, reported as percentiles because an average hides
-  what compaction does to the tail. It measures **space** amplification —
-  bytes on disk against bytes of user data — and says so; write amplification
-  would need counting at the point each file is written, which the engine does
-  not yet expose. Compared against SQLite in WAL mode where it is available.
+  what compaction does to the tail. It reports both amplifications and keeps
+  them apart: **write**, from the engine's own count of the bytes it wrote
+  against the bytes it was handed, and **space**, the settled size on disk
+  against the distinct data it holds. Compared against SQLite in WAL mode
+  where it is available.
 * `tools/fault_sweep.sh` with `tools/fault_inject.c` — makes one `fsync` or
   `rename` return `EIO`, at each point in a workload where one occurs, through
   the real system calls, and checks the database still opens and still holds

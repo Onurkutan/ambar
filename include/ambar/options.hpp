@@ -83,7 +83,7 @@ struct Options {
   // How much cache is worth having is a measurement rather than a default, and
   // it is the measurement that moves most: tools/bench reports random reads and
   // scans against cache size, and on a database of 109 MB they range from
-  // 61,000 reads/s at 1 MB to 161,000 at 256 MB, crossing SQLite's rate
+  // 62,000 reads/s at 1 MB to 177,000 at 256 MB, crossing SQLite's rate
   // somewhere in between.  docs/BENCHMARKS.md has the curve.
   Cache* block_cache = nullptr;
 

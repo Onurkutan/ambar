@@ -171,7 +171,11 @@ checksum verification that no code path consulted, a test file cited by name
 that did not exist, and a measurement attributed to a tool that had never been
 committed. Each is fixed in the obvious way — the numbers re-measured, the dead
 options removed, the missing test written, the fault-injection harness added to
-`tools/` so the measurement can be re-run rather than believed.
+`tools/` so the measurement can be re-run rather than believed. The audit
+missed one: the comment at the top of the benchmark said that the bytes
+written were counted and divided by the bytes of user data, and the same for
+reads, when nothing in the file counted either. Writes are counted now, by the
+engine, and the comment says what still is not.
 
 ## Verification
 
@@ -179,7 +183,7 @@ options removed, the missing test written, the fault-injection harness added to
     cmake --build build
     ./build/ambar_tests
 
-211 tests, no external framework. Also:
+214 tests, no external framework. Also:
 
     cmake -S . -B build-asan -DAMBAR_SANITIZE=address   # ASan + UBSan
     cmake -S . -B build-tsan -DAMBAR_SANITIZE=thread    # ThreadSanitizer
@@ -247,7 +251,16 @@ written to the working directory and is, on its own, the whole bug report.
 
     ./build/ambar_bench /tmp/bench --keys 1000000
 
-See `docs/BENCHMARKS.md` for the numbers and what they do and do not show.
+Throughput and latency as percentiles, and both amplifications kept apart:
+write, from the engine's own count of every byte it appended to a log, a
+table or a manifest, against every byte it was handed; and space, the
+settled size on disk against the distinct data. The count is checked rather
+than trusted -- `tests/test_stats.cpp` runs the engine on the simulated disk
+and requires the engine's figure for each kind of file it counts to equal
+the disk's
+own tally, and `mutations/stats.json` removes each writer from the count in
+turn. See `docs/BENCHMARKS.md` for the numbers and what they do and do not
+show.
 
 ## Documentation
 
@@ -271,9 +284,10 @@ whether `fsync` on a given platform reaches the platter, and whether a
 filesystem in writeback mode hands a new log the intact records of a deleted
 one, are outside what the simulation can see, and `docs/DESIGN.md` says so.
 
-Write amplification — the number a reader most wants beside the write
-throughput — is not measured either. `docs/BENCHMARKS.md` reports space
-amplification and says plainly that the two are different quantities.
+Read amplification is not measured. Write amplification is, from the
+engine's own count of the logs, tables and manifests it writes, and
+`docs/BENCHMARKS.md` reports it beside the space amplification that used to
+stand in for it, which is a different quantity.
 
 ## Licence
 

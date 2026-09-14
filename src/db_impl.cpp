@@ -3,6 +3,7 @@
 #include "db_impl.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <vector>
 
@@ -82,6 +83,16 @@ struct DBImpl::Writer {
   std::condition_variable condition;
   std::mutex* mutex;
 };
+
+namespace {
+
+int64_t micros_since(std::chrono::steady_clock::time_point start) {
+  return std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::steady_clock::now() - start)
+      .count();
+}
+
+}  // namespace
 
 struct DBImpl::CompactionState {
   struct Output {
@@ -171,6 +182,7 @@ Status DBImpl::new_db() {
     status = log.add_record(record);
     if (status.is_ok()) status = log.sync();
     if (status.is_ok()) status = log.close();
+    versions_->add_manifest_bytes(log.bytes_written());
   }
 
   if (status.is_ok()) {
@@ -512,6 +524,7 @@ Status DBImpl::write(const WriteOptions& options, WriteBatch* updates) {
       // one, because the skip list publishes each node with a release store.
       lock.unlock();
 
+      const uint64_t log_before = log_->bytes_written();
       status = log_->add_record(WriteBatchInternal::contents(*batch));
       if (status.is_ok()) {
         // Every write reaches the kernel here; only a sync write waits for the
@@ -535,6 +548,9 @@ Status DBImpl::write(const WriteOptions& options, WriteBatch* updates) {
       }
 
       lock.lock();
+      // Counted with the mutex back: the log is written without it, and a
+      // get_property under it must not read a number still in motion.
+      log_bytes_ += log_->bytes_written() - log_before;
     }
 
     if (batch == &tmp_batch_) tmp_batch_.clear();
@@ -999,9 +1015,23 @@ void DBImpl::background_compaction() {
     compact->smallest_snapshot = snapshots_.empty()
                                      ? versions_->last_sequence()
                                      : *snapshots_.begin();
+    const auto started = std::chrono::steady_clock::now();
     lock.unlock();
     status = do_compaction_work(compact.get());
     lock.lock();
+
+    // What the compaction cost, charged in full to the level the outputs
+    // belong to, whether or not the install below succeeds; the inputs are
+    // charged as read even when the work stopped early on an error.
+    LevelStats& stats = level_stats_[compaction->level() + 1];
+    stats.micros += micros_since(started);
+    for (int which = 0; which < 2; ++which) {
+      for (int i = 0; i < compaction->num_input_files(which); ++i) {
+        stats.bytes_read += compaction->input(which, i)->file_size;
+      }
+    }
+    stats.bytes_written += compact->total_bytes;
+    compaction_bytes_ += compact->total_bytes;
 
     if (status.is_ok()) {
       status = install_compaction_results(compact.get());
@@ -1104,6 +1134,7 @@ Status DBImpl::write_level0_table(MemTable* mem, VersionEdit* edit,
   pending_outputs_.insert(meta.number);
 
   Status status;
+  const auto started = std::chrono::steady_clock::now();
   {
     mutex_.unlock();
     std::unique_ptr<Iterator> iter(mem->new_iterator());
@@ -1123,6 +1154,11 @@ Status DBImpl::write_level0_table(MemTable* mem, VersionEdit* edit,
     }
     edit->add_file(level, meta.number, meta.file_size, meta.smallest,
                    meta.largest);
+    // What the flush cost, charged to the level the table landed in, as a
+    // compaction's outputs are charged to theirs.  Nothing was read.
+    level_stats_[level].bytes_written += meta.file_size;
+    level_stats_[level].micros += micros_since(started);
+    flush_bytes_ += meta.file_size;
   }
   return status;
 }
@@ -1321,6 +1357,9 @@ Status DBImpl::do_compaction_work(CompactionState* compact) {
   // no record that this code took that path.  The caller deletes the file.
   if (compact->builder != nullptr) {
     compact->builder->abandon();
+    // Written all the same, though the caller deletes it: the disk did the
+    // work, and the count is of what was written, not of what was kept.
+    compact->total_bytes += compact->builder->file_size();
     compact->builder.reset();
     compact->outfile.reset();
   }
@@ -1463,6 +1502,13 @@ void DBImpl::compact_range(const std::string_view* begin,
     }
     if (manual_compaction_ == &manual) manual_compaction_ = nullptr;
   }
+
+  // A round that pushed the bottom level over its limit schedules an
+  // automatic compaction as it finishes.  Waited for here, so that a caller
+  // who asked for the whole database compacted gets one with nothing in
+  // flight -- which is what tools/bench and tests/test_stats.cpp read the
+  // byte counts on the strength of.
+  wait_for_background_work();
 }
 
 bool DBImpl::get_property(std::string_view property, std::string* value) {
@@ -1487,17 +1533,48 @@ bool DBImpl::get_property(std::string_view property, std::string* value) {
   }
 
   if (name == "stats") {
-    *value = "level  files      size(MB)\n"
-             "--------------------------\n";
+    // Files and size are what each level holds now; time, read and write
+    // are what producing it has cost since the database was opened.
+    constexpr double kMB = 1048576.0;
+    *value = "level  files      size(MB)   time(s)   read(MB)  write(MB)\n"
+             "-----------------------------------------------------------\n";
     for (int level = 0; level < kNumLevels; ++level) {
       const int files = versions_->num_level_files(level);
-      if (files == 0) continue;
-      char buf[128];
-      std::snprintf(buf, sizeof(buf), "%5d %6d %13.1f\n", level, files,
+      const LevelStats& stats = level_stats_[level];
+      if (files == 0 && stats.bytes_written == 0 && stats.bytes_read == 0 &&
+          stats.micros == 0) {
+        continue;
+      }
+      char buf[160];
+      std::snprintf(buf, sizeof(buf), "%5d %6d %13.1f %9.2f %10.1f %10.1f\n",
+                    level, files,
                     static_cast<double>(versions_->num_level_bytes(level)) /
-                        1048576.0);
+                        kMB,
+                    static_cast<double>(stats.micros) / 1e6,
+                    static_cast<double>(stats.bytes_read) / kMB,
+                    static_cast<double>(stats.bytes_written) / kMB);
       *value += buf;
     }
+    char buf[192];
+    std::snprintf(buf, sizeof(buf),
+                  "written since open: log %.1f MB, tables %.1f MB "
+                  "(flush %.1f, compaction %.1f), manifest %.1f MB\n",
+                  static_cast<double>(log_bytes_) / kMB,
+                  static_cast<double>(flush_bytes_ + compaction_bytes_) / kMB,
+                  static_cast<double>(flush_bytes_) / kMB,
+                  static_cast<double>(compaction_bytes_) / kMB,
+                  static_cast<double>(versions_->manifest_bytes_written()) /
+                      kMB);
+    *value += buf;
+    return true;
+  }
+
+  if (name == "bytes-written") {
+    *value = "log " + std::to_string(log_bytes_) + "\n" +
+             "flush " + std::to_string(flush_bytes_) + "\n" +
+             "compaction " + std::to_string(compaction_bytes_) + "\n" +
+             "manifest " +
+             std::to_string(versions_->manifest_bytes_written()) + "\n";
     return true;
   }
 

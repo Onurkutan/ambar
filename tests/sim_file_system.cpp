@@ -74,6 +74,7 @@ class SimWritableFile final : public WritableFile {
       return status;
     }
     pending_.append(data.data(), data.size());
+    fs_->bytes_[SimFileSystem::kind_of(path_)] += data.size();
     while (pending_.size() >= kUserBuffer) {
       file_->kernel.append(pending_, 0, kUserBuffer);
       pending_.erase(0, kUserBuffer);
@@ -255,6 +256,12 @@ uint64_t SimFileSystem::count(const std::string& what) const {
   std::lock_guard<std::mutex> lock(mutex_);
   const auto it = counts_.find(what);
   return it == counts_.end() ? 0 : it->second;
+}
+
+uint64_t SimFileSystem::bytes_appended(const std::string& kind) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto it = bytes_.find(kind);
+  return it == bytes_.end() ? 0 : it->second;
 }
 
 std::map<std::string, uint64_t> SimFileSystem::counts() const {

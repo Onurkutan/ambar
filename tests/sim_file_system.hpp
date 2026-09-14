@@ -131,6 +131,12 @@ class SimFileSystem final : public FileSystem {
   // a rotation or a compaction rather than assume it did.
   uint64_t count(const std::string& what) const;
 
+  // Bytes appended to files of a kind -- ".log", ".sst", "MANIFEST" --
+  // counted as the engine hands them over: synced or not, kept or later
+  // removed.  A second count of what the engine says it wrote, kept where
+  // the engine cannot see it.
+  uint64_t bytes_appended(const std::string& kind) const;
+
   // Cuts the power just before operation `index` happens -- when the
   // counter equals it exactly, so an index already passed never fires --
   // and the operation itself does not.  kNever cancels.
@@ -258,6 +264,7 @@ class SimFileSystem final : public FileSystem {
   std::vector<Event> pending_;
   std::set<std::string> locked_;
   std::map<std::string, uint64_t> counts_;
+  std::map<std::string, uint64_t> bytes_;  // appended, by kind of file
   uint64_t operations_ = 0;
   uint64_t crash_at_ = kNever;
   uint64_t fail_at_ = kNever;

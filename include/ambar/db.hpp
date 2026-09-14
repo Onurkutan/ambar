@@ -92,7 +92,16 @@ class DB {
   // Introspection.  Understood names:
   //
   //   ambar.num-files-at-level<N>   files at that level
-  //   ambar.stats                   files and bytes per level
+  //   ambar.stats                   files and bytes per level, and what
+  //                                 producing each has cost since open:
+  //                                 seconds, bytes read, bytes written
+  //   ambar.bytes-written           bytes appended since open, one
+  //                                 "kind bytes" line each: log (records,
+  //                                 headers, padding), flush (tables from
+  //                                 memtables), compaction (tables from
+  //                                 compactions), manifest.  Their sum over
+  //                                 the bytes of keys and values handed in
+  //                                 is the write amplification.
   //   ambar.sstables                every file, with its key range
   //   ambar.approximate-memory-usage bytes held in memtables
   //   ambar.last-sequence           the newest sequence number assigned, which

@@ -113,6 +113,7 @@ add_executable(ambar_tests
   tests/test_repair.cpp
   tests/test_powercut.cpp
   tests/test_faults.cpp
+  tests/test_stats.cpp
   tests/sim_file_system.cpp
 )
 target_link_libraries(ambar_tests PRIVATE ambar Threads::Threads)
@@ -136,19 +137,17 @@ if(NOT MSVC)
   target_include_directories(ambar_crash_test PRIVATE src)
 endif()
 
-if(NOT MSVC)
-  add_executable(ambar_bench tools/bench.cpp)
-  target_link_libraries(ambar_bench PRIVATE ambar Threads::Threads)
-  target_include_directories(ambar_bench PRIVATE src)
+add_executable(ambar_bench tools/bench.cpp)
+target_link_libraries(ambar_bench PRIVATE ambar Threads::Threads)
+target_include_directories(ambar_bench PRIVATE src)
 
-  # SQLite is optional.  Without it the benchmark still runs and says plainly
-  # that it has nothing to compare against, rather than printing numbers with
-  # no context.
-  find_package(SQLite3 QUIET)
-  if(SQLite3_FOUND)
-    target_compile_definitions(ambar_bench PRIVATE AMBAR_BENCH_SQLITE)
-    target_link_libraries(ambar_bench PRIVATE SQLite::SQLite3)
-  endif()
+# SQLite is optional.  Without it the benchmark still runs and says plainly
+# that it has nothing to compare against, rather than printing numbers with
+# no context.
+find_package(SQLite3 QUIET)
+if(SQLite3_FOUND)
+  target_compile_definitions(ambar_bench PRIVATE AMBAR_BENCH_SQLITE)
+  target_link_libraries(ambar_bench PRIVATE SQLite::SQLite3)
 endif()
 
 # Fuzzers.  One executable per parser of untrusted bytes, plus the tool that

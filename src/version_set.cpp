@@ -600,6 +600,8 @@ Status VersionSet::log_and_apply(VersionEdit* edit, std::mutex* mutex) {
   // from growing without bound.
   std::string new_manifest;
   Status status;
+  const uint64_t manifest_before =
+      descriptor_log_ != nullptr ? descriptor_log_->bytes_written() : 0;
   if (descriptor_log_ == nullptr) {
     new_manifest = descriptor_file_name(dbname_, manifest_file_number_);
     std::unique_ptr<WritableFile> file;
@@ -633,6 +635,12 @@ Status VersionSet::log_and_apply(VersionEdit* edit, std::mutex* mutex) {
     }
 
     mutex->lock();
+  }
+
+  // Counted with the mutex back, and before the failure path below drops
+  // the log: a manifest that could not be installed was still written.
+  if (descriptor_log_ != nullptr) {
+    manifest_bytes_ += descriptor_log_->bytes_written() - manifest_before;
   }
 
   if (status.is_ok()) {

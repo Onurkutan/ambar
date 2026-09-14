@@ -7,7 +7,8 @@ measurement.
 
 ## Conditions
 
-One machine, one filesystem — a Linux container on an overlay filesystem, a
+Except where noted, one machine, one filesystem — a Linux container on an
+overlay filesystem, a
 `CMAKE_BUILD_TYPE=Release` build (which is `-O3 -DNDEBUG`), one million keys of
 the form `key_0000000042` with 100-byte values, about 109 MB of user data. An
 LSM tree's write path is dominated by how the storage handles `fsync`, which
@@ -38,7 +39,7 @@ type first.
 |---|---|---|
 | sequential, no sync | **385,000 op/s** (p50 1.7 µs, p99 5.4 µs) | 325,000 op/s (batched 1000) |
 | random, no sync | 140,000 op/s (p50 2.4 µs, p99.9 1.1 ms) | — |
-| random, `sync=true` | 4,200 op/s (p50 206 µs, p99 429 µs) | — |
+| sequential, `sync=true` | 4,200 op/s (p50 206 µs, p99 429 µs) | — |
 
 Sequential writes are about 1.2× SQLite's rate, which is a modest win and not
 the headline the shape of an LSM tree might suggest. The comparison is not
@@ -110,19 +111,86 @@ with it null this row collapses to roughly the "present keys" rate.
 Measured after a full compaction, so it is the settled size rather than a
 moment during one. Both figures reproduced byte-identically across runs.
 
+## Write amplification
+
+| | written | handed in | amplification |
+|---|---|---|---|
+| ambar | 1,241.6 MB | 219.6 MB | **5.65** |
+
+Every byte the engine appended to a log, a table or a manifest during the
+write phases above and the full compaction that follows them, against every
+byte of key and value the benchmark handed it; the few bytes of the temporary
+file behind each `CURRENT` rename are the one write left out. This is the
+cost side of the trade an LSM tree
+makes, and the number a reader most wants next to the write throughput. The
+count is the engine's own, taken at the point each file is written and read
+back through `get_property("ambar.bytes-written")`; watching the directory
+could not have produced it, because compaction writes and deletes files
+between any two looks. It is checked before it is believed:
+`tests/test_stats.cpp` runs the engine on a simulated disk and requires the
+engine's figure for each kind of file it counts to equal the disk's own
+tally of what
+was appended, and `mutations/stats.json` removes each writer from the count
+in turn to show that the check notices.
+
+Where the bytes go:
+
+| | MB | per byte handed in |
+|---|---|---|
+| log | 262.0 | 1.19 |
+| flush — tables written from memtables | 224.8 | 1.02 |
+| compaction — tables rewritten on the way down | 754.7 | 3.44 |
+| manifest | < 0.1 | — |
+
+The denominator is not the 108.7 MB the space row is measured against. The
+benchmark puts every key once in order, once more in random order, and a
+fiftieth of them again with `sync`, and the engine writes each of those, so
+it is 219.6 MB. The log costs 1.19 because each record carries a seven-byte
+header, twelve bytes of batch framing, and a type byte and a length per
+field; the flush
+costs 1.02 because a table holds the same bytes once, with an index and a
+filter on top; and compaction — the part of the trade levelled compaction
+chose to pay — costs 3.4 more as each byte is rewritten on its way down
+through the levels. By level, from a fourth run, whose amplification was
+5.67:
+
+| level | files now | size now (MB) | time (s) | read (MB) | written (MB) |
+|---|---|---|---|---|---|
+| 0 | 0 | 0.0 | 1.86 | 0.0 | 115.4 |
+| 1 | 0 | 0.0 | 6.69 | 196.1 | 194.4 |
+| 2 | 0 | 0.0 | 14.22 | 543.0 | 552.8 |
+| 3 | 57 | 110.8 | 4.24 | 132.4 | 119.6 |
+
+*Written* at a level is the tables put into it, by flushes and by the
+compactions out of the level above; *read* is what those compactions read,
+from both levels; *time* is what the flushes and compactions that wrote
+there took, on the background thread. The written column sums to the
+982.2 MB of tables that run wrote. Level 0 reads nothing because a flush
+reads nothing, and it holds
+less than the 224.8 MB of flushes because a memtable whose range overlaps
+nothing below is written straight to a deeper level, which the sequential
+pass does often. Level 2 is where the cost is: each level-1 table compacted
+into it drags the level-2 tables it overlaps through the merge, at every
+level-1 compaction, so level 2 was rewritten about five times over. The 57
+files at level 3 are the settled database; its row is everything compacted
+into level 3 since the open, most of it by the final full compaction.
+
+Measured on a different machine from the tables above — Windows 11 on NTFS,
+an MSVC Release build, the same workload — because the Linux container they
+were taken in is no longer available. The ratio transfers where a throughput
+figure would not: it is decided by the sizes of the memtable and the levels
+and by when compaction ran, not by how fast the disk is. Three runs gave
+5.59, 5.65 and 5.70. The log and flush figures were identical in all three
+and only compaction varied, because the background thread's progress against
+the writer decides how many level-0 tables each compaction picks up. There is
+no SQLite figure beside it: SQLite was not built on that machine, and
+counting what it writes would need a hook of its own.
+
 ## What is not measured
 
-**Write amplification** — the bytes an LSM tree eventually writes for each byte
-of user data, which is the cost side of the trade it makes, and the number a
-reader most wants next to the write throughput above. Measuring it honestly
-means counting at the point each file is written, and the engine does not
-expose that; sampling the directory size misses files written and deleted
-between samples. The table above reports *space* amplification, which is a
-different and much easier quantity, and says so rather than letting one word do
-duty for both.
-
-**Read amplification.** Same reason. `tests/test_table.cpp` counts block reads
-for one specific case (the filter), which is the closest this project comes.
+**Read amplification** — the blocks read for each lookup, the other side of
+the levelled trade. `tests/test_table.cpp` counts block reads for one
+specific case (the filter), which is the closest this project comes.
 
 **Anything under memory pressure or with a cold page cache.** Every number here
 was taken with the whole database in the operating system's page cache. Real

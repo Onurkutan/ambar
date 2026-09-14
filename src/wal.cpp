@@ -31,6 +31,7 @@ Status LogWriter::add_record(std::string_view payload) {
         static const char kPadding[kHeaderSize] = {};
         status = dest_->append(std::string_view(kPadding, block_left));
         if (!status.is_ok()) return status;
+        bytes_written_ += block_left;
       }
       offset_ = 0;
     }
@@ -84,6 +85,7 @@ Status LogWriter::emit_physical_record(RecordType type, const char* data,
     return s;
   }
   offset_ += kHeaderSize + length;
+  bytes_written_ += kHeaderSize + length;
   return Status::ok();
 }
 

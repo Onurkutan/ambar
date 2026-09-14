@@ -22,12 +22,13 @@
 // eventual disk traffic.  That is the trade an LSM tree makes -- sequential
 // writes now, amplified writes later.
 //
-// This project does not measure that multiple.  tools/bench reports *space*
-// amplification, which is a different and much easier quantity: bytes on disk
-// against bytes of user data.  Measuring write amplification honestly means
-// counting at the point each file is written, which the engine does not
-// expose.  docs/BENCHMARKS.md says so under "What is not measured" rather than
-// letting the two words stand in for each other.
+// The engine counts that multiple as it happens -- DBImpl keeps the bytes
+// each level's compactions read and wrote, and each flush, and this class
+// keeps the manifest's -- and reports it through get_property; tools/bench
+// divides it by the bytes handed in.  It is kept apart from *space*
+// amplification, bytes on disk against bytes of data, which is a different
+// and much easier quantity.  docs/BENCHMARKS.md reports both and says which
+// is which.
 
 #ifndef AMBAR_VERSION_SET_HPP_
 #define AMBAR_VERSION_SET_HPP_
@@ -177,6 +178,14 @@ class VersionSet {
   Version* current() const { return current_; }
 
   uint64_t manifest_file_number() const { return manifest_file_number_; }
+
+  // Bytes appended to manifests since this set was created: the snapshot
+  // each open writes, every edit after it, and the first manifest of a new
+  // database, which DBImpl::new_db writes and reports here.  Moved only
+  // under the database mutex, after the write has finished, so that a
+  // get_property under the mutex never reads a number in motion.
+  uint64_t manifest_bytes_written() const { return manifest_bytes_; }
+  void add_manifest_bytes(uint64_t bytes) { manifest_bytes_ += bytes; }
   uint64_t new_file_number() { return next_file_number_++; }
   void reuse_file_number(uint64_t number) {
     if (next_file_number_ == number + 1) next_file_number_ = number;
@@ -252,6 +261,7 @@ class VersionSet {
   // The log writer owns the file, so there is one owner rather than two that
   // could disagree about when it closes.
   std::unique_ptr<LogWriter> descriptor_log_;
+  uint64_t manifest_bytes_ = 0;
 
   Version dummy_versions_;  // head of the circular list
   Version* current_ = nullptr;

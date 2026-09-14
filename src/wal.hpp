@@ -71,11 +71,18 @@ class LogWriter {
 
   uint64_t offset() const { return offset_; }
 
+  // Bytes appended to the file so far -- headers, payloads and the padding
+  // at block ends -- which is what the file costs the disk, as opposed to
+  // what its records carried.  Write amplification is measured in the
+  // former.
+  uint64_t bytes_written() const { return bytes_written_; }
+
  private:
   Status emit_physical_record(RecordType type, const char* data, size_t length);
 
   std::unique_ptr<WritableFile> dest_;
   uint64_t offset_ = 0;  // byte position within the current block
+  uint64_t bytes_written_ = 0;
 };
 
 class LogReader {

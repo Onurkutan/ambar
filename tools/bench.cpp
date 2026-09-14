@@ -13,8 +13,11 @@
 // Throughput without amplification is half the story.  An LSM tree buys fast
 // writes by writing the same data several times over, and a benchmark that
 // reports only operations per second is reporting the half of the trade that
-// flatters it.  So the bytes actually written to disk are counted and divided
-// by the bytes of user data, and the same is done for reads.
+// flatters it.  So the bytes the engine writes are counted -- by the engine,
+// at the point each file is written, since a directory listing cannot see a
+// file that was written and deleted between two looks -- and divided by the
+// bytes it was handed.  Read amplification is not measured, and
+// docs/BENCHMARKS.md says so rather than letting one figure stand for both.
 //
 // It also compares against SQLite, when SQLite is available, because a number
 // with nothing beside it is not a measurement -- it is a number.  The
@@ -25,13 +28,13 @@
 //
 // And the read results are reported as a curve against block cache size rather
 // than as one number, because one number would have been misleading in both
-// directions.  At 1 MB of cache this engine reads at half SQLite's rate; at
-// 64 MB, with the working set resident, it reads at twice SQLite's rate.
+// directions.  At 1 MB of cache this engine reads at less than half SQLite's
+// rate; with the whole database resident it reads at about 1.3 times it.
 // Neither figure is the answer.  The answer is that random reads here are
 // bound by how much of the data is cached, which is worth knowing before
 // choosing a cache size, and is invisible in a single measurement.
 //
-// Usage: bench <dir> [--keys N] [--value-size N] [--no-sqlite]
+// Usage: bench <dir> [--keys N] [--value-size N] [--cache-mb N] [--no-sqlite]
 
 #include <algorithm>
 #include <chrono>
@@ -42,6 +45,7 @@
 #include <filesystem>
 #include <memory>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -136,20 +140,47 @@ uint64_t directory_bytes(const std::string& path) {
   return total;
 }
 
-// Counts every byte the engine writes, by watching the directory grow and
-// accounting for what compaction removes.
+// Two amplifications, and they are different quantities.
 //
-// Sampling the directory size cannot see a file that was written and deleted
-// between two samples, so it under-counts.  The honest fix is to count at the
-// source, which is what write_bytes below does by asking the filesystem for
-// each file's size as it is created -- but that needs hooks the engine does
-// not have.  So this reports the directory's final size against the user data
-// and calls it space amplification, which is what it actually is, rather than
-// calling it write amplification, which it is not.
+// Space amplification is the directory's settled size against the distinct
+// keys and values it holds: what the database costs to keep.  Write
+// amplification is every byte the engine appended to a log, a table or a
+// manifest -- records, flushes, compaction outputs, edits -- against every
+// byte of key and value it was handed, overwrites included: what a write
+// costs in disk traffic before it settles.  The engine counts the latter at
+// the point each file is written and reports it through
+// get_property("ambar.bytes-written"); watching the directory could not,
+// because a file written and deleted between two looks leaves no trace.
 struct Sizes {
-  uint64_t user_bytes = 0;
+  uint64_t user_bytes = 0;    // distinct keys and values, once each
+  uint64_t handed_bytes = 0;  // every key and value put, overwrites included
   uint64_t on_disk_bytes = 0;
 };
+
+// What the engine wrote since it was opened, by kind of file.
+struct Written {
+  uint64_t log = 0;
+  uint64_t flush = 0;
+  uint64_t compaction = 0;
+  uint64_t manifest = 0;
+  uint64_t total() const { return log + flush + compaction + manifest; }
+};
+
+Written bytes_written(DB* db) {
+  Written out;
+  std::string text;
+  if (!db->get_property("ambar.bytes-written", &text)) return out;
+  std::istringstream lines(text);
+  std::string kind;
+  uint64_t bytes = 0;
+  while (lines >> kind >> bytes) {
+    if (kind == "log") out.log = bytes;
+    if (kind == "flush") out.flush = bytes;
+    if (kind == "compaction") out.compaction = bytes;
+    if (kind == "manifest") out.manifest = bytes;
+  }
+  return out;
+}
 
 // ------------------------------------------------------------- ambar -------
 
@@ -222,6 +253,7 @@ void bench_ambar(const Config& config) {
       const std::string key = key_of(i);
       const std::string value = make_value(i, config.value_size, &rng);
       sizes.user_bytes += key.size() + value.size();
+      sizes.handed_bytes += key.size() + value.size();
       const auto op = Clock::now();
       db->put(WriteOptions(), key, value);
       latencies.add(micros_since(op));
@@ -239,16 +271,18 @@ void bench_ambar(const Config& config) {
 
     const auto start = Clock::now();
     for (const int i : order) {
+      const std::string key = key_of(i);
       const std::string value = make_value(i, config.value_size, &rng);
+      sizes.handed_bytes += key.size() + value.size();
       const auto op = Clock::now();
-      db->put(WriteOptions(), key_of(i), value);
+      db->put(WriteOptions(), key, value);
       latencies.add(micros_since(op));
     }
     latencies.report("write random (no sync)",
                      static_cast<size_t>(config.keys), seconds_since(start));
   }
 
-  // -- synced writes, a tenth as many because each one waits for the device --
+  // -- synced writes, in order, a fiftieth as many: each waits for the device --
   {
     Latencies latencies;
     const int count = std::max(1, config.keys / 50);
@@ -257,17 +291,25 @@ void bench_ambar(const Config& config) {
 
     const auto start = Clock::now();
     for (int i = 0; i < count; ++i) {
+      const std::string key = key_of(i);
       const std::string value = make_value(i, config.value_size, &rng);
+      sizes.handed_bytes += key.size() + value.size();
       const auto op = Clock::now();
-      db->put(sync_options, key_of(i), value);
+      db->put(sync_options, key, value);
       latencies.add(micros_since(op));
     }
-    latencies.report("write random (sync)", static_cast<size_t>(count),
+    latencies.report("write seq (sync)", static_cast<size_t>(count),
                      seconds_since(start),
                      "each of these waits for the storage device");
   }
 
   db->compact_range(nullptr, nullptr);
+
+  // Read now, before the reopen below: the counters belong to this open,
+  // and the sweep has settled everything the writes above set in motion.
+  const Written written = bytes_written(db.get());
+  std::string stats;
+  db->get_property("ambar.stats", &stats);
 
   // -- random reads of keys that exist --
   {
@@ -317,7 +359,8 @@ void bench_ambar(const Config& config) {
   }
 
   // The read result as a curve, because a single cache size would report
-  // either half SQLite's rate or twice it depending on which one was chosen.
+  // either less than half SQLite's rate or 1.3 times it, depending on which
+  // one was chosen.
   {
     // Reads and scans both turn out to be bound by residency, so both are
     // reported against cache size.  A single number for either would be a
@@ -353,6 +396,20 @@ void bench_ambar(const Config& config) {
     if (!DB::open(options, path, &db).is_ok()) return;
   }
 
+  constexpr double kMB = 1048576.0;
+  std::printf("  %-26s %.2f  (%.1f MB written for %.1f MB of keys and "
+              "values handed in: log %.1f, flush %.1f, compaction %.1f, "
+              "manifest %.1f)\n",
+              "write amplification",
+              static_cast<double>(written.total()) /
+                  static_cast<double>(sizes.handed_bytes),
+              static_cast<double>(written.total()) / kMB,
+              static_cast<double>(sizes.handed_bytes) / kMB,
+              static_cast<double>(written.log) / kMB,
+              static_cast<double>(written.flush) / kMB,
+              static_cast<double>(written.compaction) / kMB,
+              static_cast<double>(written.manifest) / kMB);
+
   sizes.on_disk_bytes = directory_bytes(path);
   std::printf("  %-26s %.2f  (%.1f MB on disk for %.1f MB of keys and "
               "values)\n",
@@ -362,10 +419,8 @@ void bench_ambar(const Config& config) {
               static_cast<double>(sizes.on_disk_bytes) / 1048576.0,
               static_cast<double>(sizes.user_bytes) / 1048576.0);
 
-  std::string property;
-  if (db->get_property("ambar.stats", &property)) {
-    std::printf("\n%s", property.c_str());
-  }
+  // What each level cost to produce, from the open that produced it.
+  std::printf("\n%s", stats.c_str());
 }
 
 // ------------------------------------------------------------ sqlite -------

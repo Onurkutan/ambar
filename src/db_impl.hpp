@@ -145,6 +145,27 @@ class DBImpl final : public DB {
 
   std::set<uint64_t> pending_outputs_;  // files a compaction is writing
 
+  // What producing each level has cost since the database was opened: the
+  // bytes its compactions read and wrote and the time they took, with a
+  // flush charged to the level its table landed in.  Added to only with
+  // mutex_ held, after the I/O has finished, because the I/O itself runs
+  // without it.  These three totals, with the manifest's kept by
+  // VersionSet, are what get_property("ambar.bytes-written") reports;
+  // tests/test_stats.cpp checks them against the simulated disk's own
+  // count of what was appended.  Error paths are not exact: a flush whose
+  // table could not be completed is deleted uncounted, and an append that
+  // failed partway leaves its first piece uncounted, while a compaction
+  // output abandoned partway is counted.
+  struct LevelStats {
+    uint64_t bytes_read = 0;
+    uint64_t bytes_written = 0;
+    int64_t micros = 0;
+  };
+  LevelStats level_stats_[kNumLevels];
+  uint64_t log_bytes_ = 0;         // log records, headers and padding included
+  uint64_t flush_bytes_ = 0;       // tables written from memtables
+  uint64_t compaction_bytes_ = 0;  // tables written by compactions
+
   // One worker thread for the life of the database, rather than one per
   // compaction.  The first version created a thread inside
   // maybe_schedule_compaction and joined the previous one there -- which

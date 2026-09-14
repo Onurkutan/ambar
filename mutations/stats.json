@@ -1,0 +1,34 @@
+{
+  "_comment": "The write-amplification count: each writer the engine tallies, left out in turn. tests/test_stats.cpp checks the engine's count of what it wrote against the simulated disk's count of what was appended, by kind of file, so a writer that stops counting is a mismatch rather than a smaller number nobody questions. The per-level split in ambar.stats is the same counters again by level and is not checked separately.",
+
+  "log: count the record's payload and not its header": [
+    "src/wal.cpp",
+    "  bytes_written_ += kHeaderSize + length;",
+    "  bytes_written_ += length;"
+  ],
+  "log: leave the padding at a block's end uncounted": [
+    "src/wal.cpp",
+    "        bytes_written_ += block_left;",
+    "        ;"
+  ],
+  "flush: leave the table uncounted": [
+    "src/db_impl.cpp",
+    "    flush_bytes_ += meta.file_size;",
+    "    ;"
+  ],
+  "compaction: leave the outputs uncounted": [
+    "src/db_impl.cpp",
+    "    compaction_bytes_ += compact->total_bytes;",
+    "    ;"
+  ],
+  "manifest: leave a new database's first manifest uncounted": [
+    "src/db_impl.cpp",
+    "    versions_->add_manifest_bytes(log.bytes_written());",
+    "    ;"
+  ],
+  "manifest: leave the edits after open uncounted": [
+    "src/version_set.cpp",
+    "    manifest_bytes_ += descriptor_log_->bytes_written() - manifest_before;",
+    "    (void)manifest_before;"
+  ]
+}
