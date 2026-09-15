@@ -376,6 +376,44 @@ when its last reader leaves, and only then are the files it alone referenced
 deleted. This is the same reason a compaction can never pull a file out from
 under an in-flight scan.
 
+"Any number of readers" is a promise about correctness, and what it is worth
+in throughput is measured rather than assumed: `tools/bench` runs random
+lookups on one, two, four and eight threads, once with the cache it was given
+and once with the whole database resident, so that no lookup touches the disk
+and the engine's own locks are all that is left to contend for. The first
+measurement found the promise worth 2.8× on eight threads with everything in
+memory — against 4.9× when the disk was in the path and hid the locks. Two
+locks were on the read path that did not need to be, and each was found by
+taking it out and measuring again. The table cache had one lock over every
+open table, taken twice per lookup, to find the table and to let go of it;
+it is sharded now, sixteen ways by file number, which took eight threads
+from 1.08 to 1.19 million lookups a second. The database mutex was taken a
+second time on the way out of every lookup, to drop its references and to
+charge a seek against the file searched in vain; that acquisition alone was
+worth the rest of the way to 1.33 million. A lookup now leaves without it:
+the memtables' counts were already atomic, the seek charge is only there
+when a lookup had to consult a second file — never, once the data sits in
+one level; on most lookups while level 0 is deep — and the version's count
+is atomic with one rule kept from the old design. Dropping the last reference
+unlinks the version from the set's list and releases its files, and no atomic
+counter makes that safe, so a lookup drops its reference without the mutex
+only while it is not the last one, and takes the mutex to drop the last: the
+count reaches zero, and the destructor runs, under the mutex on every path.
+A version that is current holds a reference of its own, so a lookup's is
+never the last while the version is current; it is the last only for a
+version compaction has already replaced, and then the lookup pays for the
+lock once, as it always did. The first cut of this dropped the reference
+first and took the mutex afterwards to check whether the count was still
+zero, and tracing that protocol before it was committed found a window it
+admitted: between the two steps, a thread holding the mutex could take a
+reference and drop it, deleting the version under the reader about to read
+its count. No path in this engine can take a reference to a version that is
+no longer current, so the window was not reachable — but a protocol that is
+sound only by that invariant would break the day someone walks the version
+list and takes one, and the form above does not depend on it. The rest of
+the gap is the block cache and the memtable, and `docs/BENCHMARKS.md` says
+what each of the three numbers was.
+
 The memtable is a skip list with atomic forward pointers: insertion publishes a
 node with a release store, traversal reads with acquire loads, so a concurrent
 reader either sees a complete node or does not see it at all. It admits one
@@ -659,7 +697,10 @@ which file it sits in.
   wrote against the bytes it was handed; **read**, from its count of the
   table blocks the cache did not answer against the lookups that caused
   them; and **space**, the settled size on disk against the distinct data it
-  holds. Compared against SQLite in WAL mode where it is available.
+  holds. And random reads on one to eight threads, with the database on disk
+  and with it resident, which is what found the two locks described under
+  *Concurrency* above. Compared against SQLite in WAL mode where it is
+  available.
 * `tools/fault_sweep.sh` with `tools/fault_inject.c` — makes one `fsync` or
   `rename` return `EIO`, at each point in a workload where one occurs, through
   the real system calls, and checks the database still opens and still holds

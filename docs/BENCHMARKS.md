@@ -247,12 +247,61 @@ compaction picks up; a run made while the machine was also compiling gave
 no SQLite figure beside it: SQLite was not built on that machine, and
 counting what it writes would need a hook of its own.
 
+## Read scaling
+
+The engine promises any number of readers alongside one writer and a
+compaction. This is what the promise is worth in throughput: random lookups
+for present keys on one, two, four and eight threads, 100,000 per thread,
+each thread with its own sequence of keys, on the same Windows machine as the
+two sections above, which has twelve cores.
+
+| threads | cache as given (8 MB) | | whole database resident | |
+|---|---|---|---|---|
+| 1 | 59,000 read/s | ×1.00 | 350,000 read/s | ×1.00 |
+| 2 | 118,000 | ×1.99 | 549,000 | ×1.57 |
+| 4 | 207,000 | ×3.49 | 954,000 | ×2.73 |
+| 8 | 315,000 | ×5.32 | 1,333,000 | ×3.81 |
+
+Two columns because they measure different things. With the cache as given,
+nine lookups in ten read a block from the file, and the operating system's
+page cache and the reads themselves are most of the cost; the engine's own
+locks are hidden behind them, and eight threads get five times one. With the
+whole database resident — a cache four times the data, filled by one scan,
+and 0.000 table reads per lookup over the run — nothing is left to contend
+for but the engine, and that column is the one that says what the engine
+costs.
+
+Eight threads with everything resident read 1,080,000 a second when this
+phase was first run, 2.8 times one thread, and the two changes that took
+that to 1,330,000 were each found by taking a lock out and measuring again.
+The table cache had one lock over every open table, taken twice per lookup;
+sharded sixteen ways by file number, eight threads went to 1,190,000. The
+database mutex was then taken twice per lookup as well, the second time on
+the way out, to drop its references and charge a seek; removing that
+acquisition in an experiment gave 1,480,000, and removing it properly — the
+memtables' counts were already atomic, the version's is now, with the last
+reference still dropped under the mutex, and the seek charge only taken when
+a lookup consulted a second file — gave the row above. `docs/DESIGN.md`
+says why the split is sound. What remains is the block cache, sixteen shards
+with a string allocation per lookup, and the memtable probe; neither has
+been measured on its own.
+
+The eight-thread rate is the steadier of the two figures. Across five runs it
+stayed between 1,270,000 and 1,410,000, while the single-thread rate moved
+between 300,000 and 390,000 depending on what else the machine was doing, so
+the ratio on the last row read anywhere from 3.8× to 4.5× for what was the
+same engine. A ratio with a noisy denominator is a poor headline; the rates
+are what the changes were judged by, and as everywhere in this document they
+belong to this machine.
+
 ## What is not measured
 
 **Anything under memory pressure or with a cold page cache.** Every number here
 was taken with the whole database in the operating system's page cache. Real
 storage latency would change the read figures far more than the write ones.
 
-**Concurrency.** The benchmark is single-threaded. The engine is tested under
-several threads in `tests/test_db.cpp` and under ThreadSanitizer, but its
-scaling is not measured.
+**Write scaling.** The read-scaling phase above runs readers only. Writes are
+serialised through the writer queue by design, with group commit sharing one
+log write and one `fsync` between the batches queued behind a leader, and
+what that is worth with several writers is not measured. `tests/test_db.cpp`
+runs four writers alongside three readers for correctness, not for a rate.

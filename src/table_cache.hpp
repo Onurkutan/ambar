@@ -75,33 +75,50 @@ class TableCache {
   struct Entry {
     std::unique_ptr<RandomAccessFile> file;
     std::unique_ptr<Table> table;
+    uint64_t file_number = 0;  // names the shard, for release()
     int refs = 0;         // users plus one for being in the cache
     bool in_cache = true;
   };
 
+  // The cache is split into shards by file number, each with its own lock,
+  // its own recency list and its own share of the capacity.  One lock over
+  // the whole cache was the first version, on the argument that its critical
+  // section -- a hash lookup and a list splice -- was too short to contend
+  // for, and that sharding should follow a measurement.  The measurement is
+  // tools/bench's read-scaling phase: with the whole database resident, so
+  // that no lookup touches the disk, eight threads made 1.08 million
+  // lookups a second through the single lock, which every lookup took
+  // twice -- once to find its table and once to let go of it -- and 1.19
+  // million through sixteen.  The rest of the way to 1.33 million was the
+  // database mutex; docs/BENCHMARKS.md has the whole curve.
+  struct Shard {
+    std::mutex mutex;
+    std::list<uint64_t> lru;  // front is most recently used
+    std::unordered_map<uint64_t, std::pair<std::unique_ptr<Entry>,
+                                           std::list<uint64_t>::iterator>>
+        entries;
+  };
+  static constexpr size_t kShards = 16;
+
+  Shard& shard_for(uint64_t file_number) {
+    return shards_[file_number % kShards];
+  }
+
   // Returns a referenced entry, or an error.  The caller must release().
   Status find(uint64_t file_number, uint64_t file_size, Entry** entry);
   void release(Entry* entry);
-  void evict_if_over_capacity();
+  // Called with the shard's lock held.
+  void evict_if_over_capacity(Shard* shard);
 
   const std::string dbname_;
   const Options options_;
   const Comparator* const comparator_;
-  const size_t capacity_;
+  const size_t capacity_;  // per shard
 
-  // One lock over the whole cache.  A sharded cache would scale further, and
-  // this one does not need to: the critical section is a hash lookup and a
-  // list splice, and the work it guards -- opening a file -- happens outside
-  // it.  Sharding is the kind of complexity that should follow a measurement,
-  // and there is not one yet.
-  std::mutex mutex_;
-  std::list<uint64_t> lru_;  // front is most recently used
+  Shard shards_[kShards];
 
   std::atomic<uint64_t> reads_{0};
   std::atomic<uint64_t> bytes_read_{0};
-  std::unordered_map<uint64_t, std::pair<std::unique_ptr<Entry>,
-                                         std::list<uint64_t>::iterator>>
-      entries_;
 };
 
 }  // namespace ambar

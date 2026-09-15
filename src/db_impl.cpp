@@ -762,32 +762,36 @@ Status DBImpl::get(const ReadOptions& options, std::string_view key,
 
   Status status;
   Version::GetStats stats;
-  bool have_stat_update = false;
+  lock.unlock();
 
-  {
-    lock.unlock();
-
-    // Newest source first, stopping at the first definite answer -- including
-    // a tombstone, which is definite.
-    if (mem->get(key, snapshot, value, &status)) {
-      // answered
-    } else if (imm != nullptr && imm->get(key, snapshot, value, &status)) {
-      // answered
-    } else {
-      status = current->get(options, key, snapshot, value, &stats);
-      have_stat_update = true;
-    }
-
-    lock.lock();
+  // Newest source first, stopping at the first definite answer -- including
+  // a tombstone, which is definite.
+  if (mem->get(key, snapshot, value, &status)) {
+    // answered
+  } else if (imm != nullptr && imm->get(key, snapshot, value, &status)) {
+    // answered
+  } else {
+    status = current->get(options, key, snapshot, value, &stats);
   }
 
-  if (have_stat_update && current->update_stats(stats)) {
-    maybe_schedule_compaction();
+  // The mutex is not taken again on the way out.  It used to be, for the
+  // unrefs and the seek charge; with the database in memory and eight
+  // threads reading, tools/bench put a good part of the distance from the
+  // single-thread rate on that second acquisition.  The memtables' counts
+  // are atomic, the version's release takes the mutex only to drop a last
+  // reference, and the seek charge -- which does need the mutex, since it
+  // moves a file towards compaction -- is only there when the lookup had to
+  // consult a second file, which never happens once the data sits in one
+  // level, and happens on most lookups while level 0 is deep.
+  if (stats.seek_file != nullptr) {
+    lock.lock();
+    if (current->update_stats(stats)) maybe_schedule_compaction();
+    lock.unlock();
   }
 
   mem->unref();
   if (imm != nullptr) imm->unref();
-  current->unref();
+  current->release(&mutex_);
   return status;
 }
 

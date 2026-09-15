@@ -169,6 +169,26 @@ bits per key lets about one lookup in a hundred through to a block. The
 keys now fall between present ones, and `docs/BENCHMARKS.md` reports what
 the filter actually costs and saves.
 
+**Two locks on the read path that did not need to be there.** The engine
+promises any number of readers, and the first time the benchmark ran lookups
+on eight threads with the whole database in memory, it got 2.8 times the
+rate of one thread on a twelve-core machine. With the disk in the path the
+same threads got 4.9 times, because the reads hid the locks. Each was found
+by taking a lock out and measuring again: the table cache's one lock over
+every open table, taken twice per lookup, which is sharded now; and a second
+acquisition of the database mutex on the way out of every lookup, to drop
+its reference counts, which a lookup now does without it — the version's
+count is atomic, and only the last reference is still dropped under the
+mutex, which a lookup's never is while the version is current. The first
+cut of that dropped the reference first and took the mutex afterwards to
+see whether the count was still zero, and tracing it before it was
+committed found the window that protocol admits, where a thread under the
+mutex could take and drop a reference and delete the version under the
+reader; nothing in the engine can take that reference today, and the form
+that replaced it does not need that to stay true. Eight threads read 1.3
+million keys a second from memory now, up from 1.1 million, and
+`docs/BENCHMARKS.md` says where the rest of the gap is.
+
 **And several claims that were simply wrong.** The design document said, as
 such documents usually do, that the log record must precede the memtable insert
 or a value becomes readable before it is durable. Swapping the two and running
@@ -270,7 +290,10 @@ caused them; and space, the settled size on disk against the distinct data.
 The counts are checked rather than trusted -- `tests/test_stats.cpp` runs
 the engine on the simulated disk and requires the engine's figures to equal
 the disk's own tallies of what was appended and what was served, and
-`mutations/stats.json` removes each counter in turn. See `docs/BENCHMARKS.md`
+`mutations/stats.json` removes each counter in turn. And random reads on one
+to eight threads, with the database on disk and with it held entirely in
+memory, where the engine's own locks are all that is left to measure. See
+`docs/BENCHMARKS.md`
 for the numbers and what they do and do not show.
 
 ## Documentation

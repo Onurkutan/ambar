@@ -169,12 +169,37 @@ Version::~Version() {
   }
 }
 
-void Version::ref() { ++refs_; }
+void Version::ref() { refs_.fetch_add(1, std::memory_order_relaxed); }
 
 void Version::unref() {
   assert(this != &vset_->dummy_versions_);
-  assert(refs_ >= 1);
-  if (--refs_ == 0) delete this;
+  assert(refs_.load(std::memory_order_relaxed) >= 1);
+  if (refs_.fetch_sub(1, std::memory_order_acq_rel) == 1) delete this;
+}
+
+void Version::release(std::mutex* mutex) {
+  assert(this != &vset_->dummy_versions_);
+  // Decremented without the mutex only while another reference remains, so
+  // that the count never reaches zero outside it.  A decrement to zero would
+  // otherwise have to be followed by taking the mutex and reading the count
+  // again, and between the two a thread holding the mutex could take a new
+  // reference and drop it -- deleting the version under a reader about to
+  // read its count.  No path in the engine takes a reference to a version
+  // that is no longer current, so that could not happen today; this form
+  // does not depend on it staying true.  A count of one is dropped under
+  // the mutex, the same way unref() drops it, and the destructor runs under
+  // the mutex on every path.
+  int count = refs_.load(std::memory_order_relaxed);
+  while (count > 1) {
+    if (refs_.compare_exchange_weak(count, count - 1,
+                                    std::memory_order_acq_rel,
+                                    std::memory_order_relaxed)) {
+      return;
+    }
+  }
+  assert(count == 1);
+  std::lock_guard<std::mutex> lock(*mutex);
+  unref();
 }
 
 void Version::add_iterators(const ReadOptions& options,

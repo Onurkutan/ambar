@@ -34,7 +34,8 @@
 // bound by how much of the data is cached, which is worth knowing before
 // choosing a cache size, and is invisible in a single measurement.
 //
-// Usage: bench <dir> [--keys N] [--value-size N] [--cache-mb N] [--no-sqlite]
+// Usage: bench <dir> [--keys N] [--value-size N] [--cache-mb N] [--threads N]
+//              [--no-sqlite]
 
 #include <algorithm>
 #include <chrono>
@@ -47,6 +48,7 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "ambar/db.hpp"
@@ -67,6 +69,7 @@ struct Config {
   int keys = 500000;
   int value_size = 100;
   int cache_mb = 8;
+  int threads = 8;  // the most the read-scaling phase runs at once
   bool use_sqlite = true;
 };
 
@@ -288,6 +291,93 @@ void read_curve(DB* db, const Config& config, const char* label) {
               scan_rate, scan_read_per_byte);
 }
 
+// Aggregate random-read throughput with `threads` threads each making
+// `per_thread` lookups for present keys, each thread with its own sequence
+// of keys.  The clock covers the threads from start to join.
+double reads_with_threads(DB* db, const Config& config, int threads,
+                          int per_thread) {
+  std::vector<std::thread> workers;
+  const auto start = Clock::now();
+  for (int t = 0; t < threads; ++t) {
+    workers.emplace_back([&, t] {
+      std::mt19937 rng(static_cast<std::mt19937::result_type>(11 + t));
+      std::string value;
+      for (int i = 0; i < per_thread; ++i) {
+        const int id =
+            static_cast<int>(rng() % static_cast<unsigned>(config.keys));
+        db->get(ReadOptions(), key_of(id), &value);
+      }
+    });
+  }
+  for (auto& worker : workers) worker.join();
+  return static_cast<double>(threads) * static_cast<double>(per_thread) /
+         seconds_since(start);
+}
+
+// Random reads at 1, 2, 4 ... threads, twice over: with the cache the
+// benchmark was given, where most lookups go to the file, and with the
+// whole database resident, where none do and the engine's own locks are
+// all that is left to contend for.  The engine promises any number of
+// readers; this is what the promise is worth in throughput.
+void read_scaling(const Config& config, const Options& options,
+                  const std::string& path, uint64_t data_bytes) {
+  std::vector<int> counts;
+  for (int n = 1; n <= config.threads; n *= 2) counts.push_back(n);
+  const int per_thread = std::min(config.keys, 100000);
+
+  std::vector<double> given;     // reads/s with the cache given
+  std::vector<double> resident;  // reads/s with everything cached
+  double resident_reads_per_lookup = 0;
+
+  {
+    Options given_options = options;
+    given_options.create_if_missing = false;
+    std::unique_ptr<DB> db;
+    if (!DB::open(given_options, path, &db).is_ok()) return;
+    for (const int n : counts) {
+      given.push_back(reads_with_threads(db.get(), config, n, per_thread));
+    }
+  }
+  {
+    const auto cache = new_lru_cache(static_cast<size_t>(4 * data_bytes));
+    Options resident_options = options;
+    resident_options.block_cache = cache.get();
+    resident_options.create_if_missing = false;
+    std::unique_ptr<DB> db;
+    if (!DB::open(resident_options, path, &db).is_ok()) return;
+    // One scan fills the cache with every data block.
+    {
+      std::unique_ptr<Iterator> iter(db->new_iterator(ReadOptions()));
+      for (iter->seek_to_first(); iter->valid(); iter->next()) {
+      }
+    }
+    const Reads before = table_reads(db.get());
+    uint64_t lookups = 0;
+    for (const int n : counts) {
+      resident.push_back(reads_with_threads(db.get(), config, n, per_thread));
+      lookups += static_cast<uint64_t>(n) * static_cast<uint64_t>(per_thread);
+    }
+    const Reads after = table_reads(db.get());
+    resident_reads_per_lookup =
+        static_cast<double>(after.reads - before.reads) /
+        static_cast<double>(lookups);
+  }
+
+  std::printf("\n  random reads by threads, present keys, %d lookups per "
+              "thread\n",
+              per_thread);
+  std::printf("      %-8s %-32s %-32s\n", "threads", "cache as given",
+              "whole database resident");
+  for (size_t i = 0; i < counts.size(); ++i) {
+    std::printf("      %-8d %9.0f read/s  x%-5.2f          %9.0f read/s  "
+                "x%-5.2f\n",
+                counts[i], given[i], given[i] / given[0], resident[i],
+                resident[i] / resident[0]);
+  }
+  std::printf("      %-8s resident: %.3f table reads per lookup over the run\n",
+              "", resident_reads_per_lookup);
+}
+
 void bench_ambar(const Config& config) {
   const std::string path = config.dir + "/ambar";
   std::filesystem::remove_all(path);
@@ -474,6 +564,8 @@ void bench_ambar(const Config& config) {
       read_curve(sweep_db.get(), config, label);
     }
 
+    read_scaling(config, options, path, data_bytes);
+
     if (!DB::open(options, path, &db).is_ok()) return;
   }
 
@@ -655,6 +747,8 @@ int main(int argc, char** argv) {
       config.value_size = std::atoi(argv[++i]);
     } else if (arg == "--cache-mb" && i + 1 < argc) {
       config.cache_mb = std::atoi(argv[++i]);
+    } else if (arg == "--threads" && i + 1 < argc) {
+      config.threads = std::max(1, std::atoi(argv[++i]));
     } else if (arg == "--no-sqlite") {
       config.use_sqlite = false;
     } else if (arg[0] != '-') {

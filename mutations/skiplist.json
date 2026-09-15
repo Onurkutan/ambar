@@ -15,5 +15,15 @@
     "src/db_impl.cpp",
     "      std::lock_guard<std::mutex> lock(*mutex_);\n      mem_->unref();",
     "      mem_->unref();"
+  ],
+  "lookup teardown: drop the last reference without the lock": [
+    "src/version_set.cpp",
+    "  assert(count == 1);\n  std::lock_guard<std::mutex> lock(*mutex);\n  unref();",
+    "  assert(count == 1);\n  (void)mutex;\n  unref();"
+  ],
+  "lookup teardown: unlink the version with no lock at all": [
+    "src/db_impl.cpp",
+    "  current->release(&mutex_);\n  return status;",
+    "  current->unref();\n  return status;"
   ]
 }

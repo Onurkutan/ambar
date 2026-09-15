@@ -33,6 +33,7 @@
 #ifndef AMBAR_VERSION_SET_HPP_
 #define AMBAR_VERSION_SET_HPP_
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -102,16 +103,25 @@ class Version {
   // Returns true when the charge suggests a compaction is now worth starting.
   bool update_stats(const GetStats& stats);
 
-  // REQUIRES: the database mutex is held.
+  // ref() and unref() REQUIRE the database mutex.  release() does not.
   //
-  // Not atomic, and deliberately so.  Dropping the last reference also unlinks
-  // the version from the set's list and releases every file it holds, and
-  // those are not operations an atomic counter can make safe -- so the counter
-  // is guarded by the same lock as everything else it touches.  An atomic
-  // counter here would look thread-safe and would let a version be unlinked
-  // while a compaction was walking the list.
+  // The count is atomic so that a lookup can let go of its version without
+  // taking the database mutex a second time for exactly that: tools/bench's
+  // read-scaling phase, on a database held entirely in memory, put a good
+  // part of the gap between one thread and eight on that second
+  // acquisition.  What the mutex still guards is the part an atomic counter
+  // cannot make safe: dropping the last reference unlinks the version from
+  // the set's list and releases every file it holds.  So release() drops a
+  // reference without the mutex only while it is not the last one, and
+  // takes the mutex to drop the last, which means the count reaches zero
+  // and the destructor runs under the mutex on every path -- and a thread
+  // that takes a new reference under the mutex, which is the only place
+  // ref() may be called, either sees the version still alive or never sees
+  // it at all.  A version that is current holds a reference of its own, so
+  // a lookup's release is never the last while the version is current.
   void ref();
   void unref();
+  void release(std::mutex* mutex);
 
   void get_overlapping_inputs(int level, const std::string* begin,
                               const std::string* end,
@@ -140,7 +150,7 @@ class Version {
   VersionSet* const vset_;
   Version* next_ = this;  // circular list of live versions, newest last
   Version* prev_ = this;
-  int refs_ = 0;
+  std::atomic<int> refs_{0};
 
   std::vector<FileMetaData*> files_[kNumLevels];
 
