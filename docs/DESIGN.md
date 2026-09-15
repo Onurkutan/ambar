@@ -472,6 +472,18 @@ The manifest is a log of *edits* rather than a snapshot, so installing a
 compaction result is one small append plus one fsync, not a rewrite of the whole
 file set.
 
+### Format stability
+
+The layout above is the format of version 0.1.0, and `ambar::kVersion` in
+the public header says which version a build is. Before 1.0 the format may
+change between minor versions, and a database written by one is not promised
+to open under another: a table's footer carries a magic number that says
+what kind of file it is, and nothing on disk says which version wrote it, so
+an older build reading a newer file would fail a checksum or a bounds check
+rather than a version check, and report damage. A change to the format is a
+change to the minor version, and this section will say what changed and from
+which version. Nothing has changed yet.
+
 ## Compaction
 
 Levelled, RocksDB/LevelDB style.

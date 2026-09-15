@@ -36,6 +36,15 @@
 
 namespace ambar {
 
+// The engine's version, as the tag it was released from.  Before 1.0 the
+// on-disk format may change between minor versions, and a database written
+// by one is not promised to open under another; a change to the format is a
+// change to this number, and docs/DESIGN.md says what changed.
+constexpr int kMajorVersion = 0;
+constexpr int kMinorVersion = 1;
+constexpr int kPatchVersion = 0;
+constexpr std::string_view kVersion = "0.1.0";
+
 // A point in the database's history, held open.
 //
 // Opaque on purpose: it is a sequence number, but a caller who knew that could

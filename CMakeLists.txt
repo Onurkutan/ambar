@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
-project(ambar LANGUAGES CXX)
+# The version here and ambar::kVersion in include/ambar/db.hpp are the same
+# number by hand; the test below fails the build if they drift apart.
+project(ambar VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -100,6 +102,7 @@ add_executable(ambar_tests
   tests/test_encoding.cpp
   tests/test_wal.cpp
   tests/test_dbformat.cpp
+  tests/test_version.cpp
   tests/test_skiplist.cpp
   tests/test_memtable.cpp
   tests/test_write_batch.cpp
@@ -118,6 +121,10 @@ add_executable(ambar_tests
 )
 target_link_libraries(ambar_tests PRIVATE ambar Threads::Threads)
 target_include_directories(ambar_tests PRIVATE src tests)
+# What project() above says the version is, for tests/test_version.cpp to
+# hold ambar::kVersion against.
+target_compile_definitions(ambar_tests PRIVATE
+  AMBAR_CMAKE_VERSION="${PROJECT_VERSION}")
 add_test(NAME unit COMMAND ambar_tests)
 
 # Tools.  Built by default so that a change which breaks them fails the normal
