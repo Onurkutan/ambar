@@ -214,7 +214,7 @@ engine, and the comment says what still is not.
     cmake --build build
     ./build/ambar_tests
 
-217 tests, no external framework. Also:
+218 tests, no external framework. Also:
 
     cmake -S . -B build-asan -DAMBAR_SANITIZE=address   # ASan + UBSan
     cmake -S . -B build-tsan -DAMBAR_SANITIZE=thread    # ThreadSanitizer
@@ -290,11 +290,13 @@ caused them; and space, the settled size on disk against the distinct data.
 The counts are checked rather than trusted -- `tests/test_stats.cpp` runs
 the engine on the simulated disk and requires the engine's figures to equal
 the disk's own tallies of what was appended and what was served, and
-`mutations/stats.json` removes each counter in turn. And random reads on one
-to eight threads, with the database on disk and with it held entirely in
-memory, where the engine's own locks are all that is left to measure. See
-`docs/BENCHMARKS.md`
-for the numbers and what they do and do not show.
+`mutations/stats.json` removes each counter in turn. And both kinds of
+scaling: random reads on one to eight threads, with the database on disk
+and with it held entirely in memory, where the engine's own locks are all
+that is left to measure; and synced writes on one to eight threads, beside
+the number of batches each `fsync` carried, which is what group commit is
+for. See `docs/BENCHMARKS.md` for the numbers and what they do and do not
+show.
 
 ## Documentation
 

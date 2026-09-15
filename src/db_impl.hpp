@@ -163,6 +163,12 @@ class DBImpl final : public DB {
   };
   LevelStats level_stats_[kNumLevels];
   uint64_t log_bytes_ = 0;         // log records, headers and padding included
+  // Group commit, counted: records appended to the log, and the writers'
+  // batches those records carried.  One record per group, so the second
+  // over the first is how many batches a log write and its fsync served.
+  // get_property("ambar.log-writes") reports both; tools/bench divides.
+  uint64_t log_writes_ = 0;
+  uint64_t batches_written_ = 0;
   uint64_t flush_bytes_ = 0;       // tables written from memtables
   uint64_t compaction_bytes_ = 0;  // tables written by compactions
 

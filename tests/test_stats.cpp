@@ -12,11 +12,16 @@
 //
 // Read amplification the same way: every read of a table file, counted by
 // the engine where it opens them and by the disk where it serves them.
+// And group commit: the records the log received and the batches they
+// carried, counted from both ends of the writer queue.
 
+#include <atomic>
 #include <cstdio>
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "ambar/db.hpp"
 #include "ambar/filter_policy.hpp"
@@ -100,6 +105,10 @@ std::map<std::string, uint64_t> bytes_written(DB* db) {
   return lines_of(db, "ambar.bytes-written");
 }
 
+std::map<std::string, uint64_t> log_writes(DB* db) {
+  return lines_of(db, "ambar.log-writes");
+}
+
 std::map<std::string, uint64_t> table_reads(DB* db) {
   return lines_of(db, "ambar.table-reads");
 }
@@ -171,10 +180,9 @@ TEST(stats, counts_every_byte_the_disk_saw) {
 // The log writer's count is of what reached the file, not of what it was
 // given: seven bytes of header per fragment, and the zeros that pad out a
 // block with too little room left for a header.  A workload rarely lands
-// on that last case -- the other two tests here did not, and a mutation
+// on that last case -- the workload tests here did not, and a mutation
 // that stopped counting the padding survived them -- so it is hit on
-// purpose: a
-// record sized to leave three bytes in the block, then one more.
+// purpose: a record sized to leave three bytes in the block, then one more.
 TEST(stats, the_log_counts_its_headers_and_padding) {
   Disk disk;
   std::unique_ptr<WritableFile> file;
@@ -255,6 +263,66 @@ TEST(stats, a_lookup_the_cache_answers_reads_nothing) {
   const uint64_t after_first = at(table_reads(db.get()), "reads");
   CHECK_OK(db->get(ReadOptions(), key_of(1234), &value));
   CHECK_EQ(at(table_reads(db.get()), "reads"), after_first);
+}
+
+// Group commit, counted: one record per group, and the batches it carried.
+// Written one at a time there is never anyone to group with, so the two
+// counts are equal and both are the number of writes; written from several
+// threads at once they are not, and the difference is what group commit
+// saved.  How many groups form depends on scheduling, so the threaded half
+// pins what must hold on any machine -- every batch counted once, never
+// more records than batches -- and prints what it saw.  tools/bench reports
+// the size of the groups under a load it controls.
+TEST(stats, counts_the_batches_each_log_write_carried) {
+  Disk disk;
+  std::unique_ptr<DB> db;
+  CHECK_OK(DB::open(small_options(), "sim/db", &db));
+
+  put_keys(db.get(), 0, 200);
+  {
+    WriteBatch batch;
+    batch.put("a", "1");
+    batch.put("b", "2");
+    CHECK_OK(db->write(WriteOptions(), &batch));
+  }
+  auto serial = log_writes(db.get());
+  CHECK_EQ(at(serial, "records"), uint64_t{201});
+  CHECK_EQ(at(serial, "batches"), uint64_t{201});
+
+  // A flush through compact_range is a write with no batch: it joins no
+  // group and counts as none.
+  db->compact_range(nullptr, nullptr);
+  serial = log_writes(db.get());
+  CHECK_EQ(at(serial, "records"), uint64_t{201});
+  CHECK_EQ(at(serial, "batches"), uint64_t{201});
+
+  constexpr int kThreads = 8;
+  constexpr int kPerThread = 250;
+  std::atomic<int> failures{0};
+  std::vector<std::thread> threads;
+  for (int t = 0; t < kThreads; ++t) {
+    threads.emplace_back([&, t] {
+      WriteOptions sync;
+      sync.sync = true;
+      for (int i = 0; i < kPerThread; ++i) {
+        const int id = 1000 + t * kPerThread + i;
+        if (!db->put(sync, key_of(id), value_of(id)).is_ok()) ++failures;
+      }
+    });
+  }
+  for (auto& thread : threads) thread.join();
+  CHECK_EQ(failures.load(), 0);
+
+  const auto grouped = log_writes(db.get());
+  const uint64_t batches = at(grouped, "batches") - 201;
+  const uint64_t records = at(grouped, "records") - 201;
+  CHECK_EQ(batches, uint64_t{kThreads * kPerThread});
+  CHECK(records >= 1);
+  CHECK(records <= batches);
+  std::printf("    %llu writes from %d threads went to the log in %llu "
+              "records: %.2f batches per record\n",
+              ull(batches), kThreads, ull(records),
+              static_cast<double>(batches) / static_cast<double>(records));
 }
 
 TEST(stats, counts_what_recovery_writes_and_starts_from_open) {

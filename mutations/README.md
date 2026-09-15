@@ -62,6 +62,14 @@ journal than the rename. The database opens on its previous state, the log
 is replayed, nothing acknowledged is missing. They stay in the file so the
 argument is re-run rather than remembered.
 
+**`stats.json`: counting only the leader's batch — may survive on a loaded
+machine.** The test that catches it writes from eight threads at once and
+checks that every batch was counted, which the mutation breaks only when
+two writers were queued together; whether they ever are depends on the
+scheduler. On this machine they always are, by hundreds. A survival on a
+machine where no group formed says nothing about the count, and the test
+prints how many groups it saw so the two cases can be told apart.
+
 ## The other direction: failure injection
 
 `tools/mutate.py` breaks the code. `tests/test_faults.cpp` breaks the *disk*

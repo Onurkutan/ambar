@@ -294,14 +294,49 @@ same engine. A ratio with a noisy denominator is a poor headline; the rates
 are what the changes were judged by, and as everywhere in this document they
 belong to this machine.
 
+## Write scaling
+
+Writes are serialised by design: one writer at a time, through a queue, and
+the writer at the front merges every batch queued behind it into one log
+record with one `fsync`. Whether that turns several threads' worth of synced
+writes into more than one thread's rate is a measurement, and so is the size
+of the groups it makes — which the engine counts, as records appended to the
+log and the batches they carried, and reports through
+`get_property("ambar.log-writes")`. Synced writes from one, two, four and
+eight threads, 2,500 per thread, each thread on its own keys, on the Windows
+machine of the sections above:
+
+| threads | writes/s | | batches per `fsync` |
+|---|---|---|---|
+| 1 | 1,588 | ×1.00 | 1.00 |
+| 2 | 2,346 | ×1.48 | 1.48 |
+| 4 | 3,948 | ×2.49 | 2.50 |
+| 8 | 7,384 | ×4.65 | 4.77 |
+
+The two columns move together, and that agreement is the finding: the rate
+climbs exactly as far as the groups grow, so it is group commit that buys
+the throughput and nothing else. One thread can never share an `fsync`,
+because there is never anyone queued behind it; eight threads share each
+one between nearly five. The device flush is the cost that does not scale,
+at about 600 µs on this disk, and every batch that rides one already paid
+for is a batch that did not wait for its own.
+
+`tests/test_stats.cpp` checks the count from both ends — written one at a
+time, records and batches are equal; from eight threads at once, every batch
+is counted and no record carries none — and `mutations/stats.json` removes
+each half of it in turn. Three runs agreed more closely than any other
+figure in this document — the eight-thread row moved between 7,190 and
+7,380 writes a second and between 4.72 and 4.77 batches per `fsync` — which
+is what a phase bound by the device rather than by the CPU looks like on a
+machine doing other things; the table is the first of the three.
+
 ## What is not measured
 
 **Anything under memory pressure or with a cold page cache.** Every number here
 was taken with the whole database in the operating system's page cache. Real
 storage latency would change the read figures far more than the write ones.
 
-**Write scaling.** The read-scaling phase above runs readers only. Writes are
-serialised through the writer queue by design, with group commit sharing one
-log write and one `fsync` between the batches queued behind a leader, and
-what that is worth with several writers is not measured. `tests/test_db.cpp`
-runs four writers alongside three readers for correctness, not for a rate.
+**Unsynced write scaling.** Without `sync` there is no device flush to
+share, and what several writers cost each other is the queue and the log
+append; not measured, since the read side's two locks were the ones with a
+number to find, and this side's lock is the design.

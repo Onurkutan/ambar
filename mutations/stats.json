@@ -45,5 +45,20 @@
     "src/table_cache.cpp",
     "  std::unique_ptr<RandomAccessFile> file = std::make_unique<CountingFile>(\n      std::move(opened), &reads_, &bytes_read_);",
     "  std::unique_ptr<RandomAccessFile> file = std::move(opened);"
+  ],
+  "group commit: leave the records uncounted": [
+    "src/db_impl.cpp",
+    "      ++log_writes_;",
+    "      ;"
+  ],
+  "group commit: count a flush with no batch as one": [
+    "src/db_impl.cpp",
+    "    if (ready->batch != nullptr) ++batches_written_;",
+    "    ++batches_written_;"
+  ],
+  "group commit: count only the leader's batch": [
+    "src/db_impl.cpp",
+    "    if (ready->batch != nullptr) ++batches_written_;",
+    "    if (ready == &writer) ++batches_written_;"
   ]
 }

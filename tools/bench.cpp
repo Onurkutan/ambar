@@ -314,6 +314,75 @@ double reads_with_threads(DB* db, const Config& config, int threads,
          seconds_since(start);
 }
 
+// Group commit since the database was opened: records appended to the log,
+// and the writers' batches they carried.
+struct LogWrites {
+  uint64_t records = 0;
+  uint64_t batches = 0;
+};
+
+LogWrites log_writes(DB* db) {
+  LogWrites out;
+  std::string text;
+  if (!db->get_property("ambar.log-writes", &text)) return out;
+  std::istringstream lines(text);
+  std::string what;
+  uint64_t n = 0;
+  while (lines >> what >> n) {
+    if (what == "records") out.records = n;
+    if (what == "batches") out.batches = n;
+  }
+  return out;
+}
+
+// Synced writes from `threads` threads at once, `per_thread` each, every
+// thread on its own slice of the key space, and what group commit made of
+// them: the writes per second, and how many batches each log write -- and
+// its fsync -- carried.  Returns the bytes of key and value handed in, so
+// the caller can keep the amplification's denominator honest.
+uint64_t write_scaling_row(DB* db, const Config& config, int threads,
+                           int per_thread, std::mt19937* rng) {
+  // Values made up front, on one thread, so the timed region holds only
+  // the writes; the generator is not shared between threads.
+  std::vector<std::string> values(
+      static_cast<size_t>(threads) * static_cast<size_t>(per_thread));
+  uint64_t handed = 0;
+  for (size_t i = 0; i < values.size(); ++i) {
+    values[i] = make_value(static_cast<int>(i), config.value_size, rng);
+    handed += values[i].size();
+  }
+
+  WriteOptions sync_options;
+  sync_options.sync = true;
+  const LogWrites before = log_writes(db);
+  std::vector<std::thread> workers;
+  const auto start = Clock::now();
+  for (int t = 0; t < threads; ++t) {
+    workers.emplace_back([&, t] {
+      for (int i = 0; i < per_thread; ++i) {
+        const int id = t * per_thread + i;
+        db->put(sync_options, key_of(id), values[static_cast<size_t>(id)]);
+      }
+    });
+  }
+  for (auto& worker : workers) worker.join();
+  const double seconds = seconds_since(start);
+  const LogWrites after = log_writes(db);
+  for (int id = 0; id < threads * per_thread; ++id) handed += key_of(id).size();
+
+  const double writes = static_cast<double>(threads) *
+                        static_cast<double>(per_thread);
+  const uint64_t records = after.records - before.records;
+  std::printf("      %-8d %9.0f write/s   %6.2f batches per log write and "
+              "fsync\n",
+              threads, writes / seconds,
+              records == 0 ? 0.0
+                           : static_cast<double>(after.batches -
+                                                 before.batches) /
+                                 static_cast<double>(records));
+  return handed;
+}
+
 // Random reads at 1, 2, 4 ... threads, twice over: with the cache the
 // benchmark was given, where most lookups go to the file, and with the
 // whole database resident, where none do and the engine's own locks are
@@ -460,6 +529,21 @@ void bench_ambar(const Config& config) {
     latencies.report("write seq (sync)", static_cast<size_t>(count),
                      seconds_since(start),
                      "each of these waits for the storage device");
+  }
+
+  // -- synced writes from several threads: what group commit is worth --
+  //
+  // One writer at a time is the design, and the queue behind the writer
+  // merges everything waiting into one log write and one fsync.  Whether
+  // that turns eight threads' worth of syncs into more than one thread's
+  // rate is a measurement, and so is how many batches each fsync carries.
+  {
+    std::printf("\n  synced writes by threads, %d per thread\n",
+                std::max(1, config.keys / 400));
+    for (int n = 1; n <= config.threads; n *= 2) {
+      sizes.handed_bytes += write_scaling_row(
+          db.get(), config, n, std::max(1, config.keys / 400), &rng);
+    }
   }
 
   db->compact_range(nullptr, nullptr);

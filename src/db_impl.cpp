@@ -549,8 +549,12 @@ Status DBImpl::write(const WriteOptions& options, WriteBatch* updates) {
 
       lock.lock();
       // Counted with the mutex back: the log is written without it, and a
-      // get_property under it must not read a number still in motion.
+      // get_property under it must not read a number still in motion.  A
+      // record that failed partway is still a log write that was attempted,
+      // and the batches it carried are still reported below, so both are
+      // counted whatever the status.
       log_bytes_ += log_->bytes_written() - log_before;
+      ++log_writes_;
     }
 
     if (batch == &tmp_batch_) tmp_batch_.clear();
@@ -582,10 +586,14 @@ Status DBImpl::write(const WriteOptions& options, WriteBatch* updates) {
     }
   }
 
-  // Report to everyone whose batch was included.
+  // Report to everyone whose batch was included.  A write with no batch --
+  // the flush compact_range asks for -- joined no group and is not counted
+  // as one; every other writer answered here was carried by the one record
+  // written above.
   while (true) {
     Writer* ready = writers_.front();
     writers_.pop_front();
+    if (ready->batch != nullptr) ++batches_written_;
     if (ready != &writer) {
       ready->status = status;
       ready->done = true;
@@ -1581,6 +1589,12 @@ bool DBImpl::get_property(std::string_view property, std::string* value) {
   if (name == "table-reads") {
     *value = "reads " + std::to_string(table_cache_->reads()) + "\n" +
              "bytes " + std::to_string(table_cache_->bytes_read()) + "\n";
+    return true;
+  }
+
+  if (name == "log-writes") {
+    *value = "records " + std::to_string(log_writes_) + "\n" +
+             "batches " + std::to_string(batches_written_) + "\n";
     return true;
   }
 

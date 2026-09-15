@@ -111,6 +111,12 @@ class DB {
   //                                 compactions), manifest.  Their sum over
   //                                 the bytes of keys and values handed in
   //                                 is the write amplification.
+  //   ambar.log-writes              group commit since open, as "records N"
+  //                                 and "batches N" lines: records appended
+  //                                 to the log, and the writers' batches
+  //                                 they carried.  Batches over records is
+  //                                 how many writes each log write and its
+  //                                 fsync served.
   //   ambar.table-reads             reads of table files since open, as
   //                                 "reads N" and "bytes N" lines: every
   //                                 data block the block cache did not

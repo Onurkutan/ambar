@@ -103,6 +103,17 @@ ten. The group is capped, and a writer that asked for `sync` is never merged
 into a group that is not syncing — being told a write is durable when it is not
 is worse than waiting.
 
+What that is worth is measured rather than asserted. The engine counts the
+records it appends to the log and the batches they carried, and reports both
+through `get_property("ambar.log-writes")`; `tools/bench` runs synced writes
+from one to eight threads and prints the rate beside the batches each
+`fsync` served. On this machine eight threads write at 4.7 times one thread's
+rate and each `fsync` carries 4.8 batches, and the two figures moving
+together is what says the throughput is the grouping and nothing else.
+`tests/test_stats.cpp` holds the count from both ends: written one at a
+time the two numbers are equal, and from eight threads at once every batch
+is counted exactly once.
+
 ## The read path
 
 ```
@@ -709,10 +720,12 @@ which file it sits in.
   wrote against the bytes it was handed; **read**, from its count of the
   table blocks the cache did not answer against the lookups that caused
   them; and **space**, the settled size on disk against the distinct data it
-  holds. And random reads on one to eight threads, with the database on disk
-  and with it resident, which is what found the two locks described under
-  *Concurrency* above. Compared against SQLite in WAL mode where it is
-  available.
+  holds. And both kinds of scaling: random reads on one to eight threads,
+  with the database on disk and with it resident, which is what found the
+  two locks described under *Concurrency* above; and synced writes on one
+  to eight threads beside the batches each `fsync` carried, which is what
+  *Group commit* above promises. Compared against SQLite in WAL mode where
+  it is available.
 * `tools/fault_sweep.sh` with `tools/fault_inject.c` — makes one `fsync` or
   `rename` return `EIO`, at each point in a workload where one occurs, through
   the real system calls, and checks the database still opens and still holds
