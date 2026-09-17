@@ -35,7 +35,7 @@
 // choosing a cache size, and is invisible in a single measurement.
 //
 // Usage: bench <dir> [--keys N] [--value-size N] [--cache-mb N] [--threads N]
-//              [--no-sqlite]
+//              [--write-buffer-mb N] [--no-sqlite]
 
 #include <algorithm>
 #include <chrono>
@@ -70,6 +70,12 @@ struct Config {
   int value_size = 100;
   int cache_mb = 8;
   int threads = 8;  // the most the read-scaling phase runs at once
+  // The memtable.  Four megabytes flushes every forty thousand writes and
+  // keeps compaction running through the write phases, which is the
+  // engine as configured; a large one -- 64, say -- runs the write-scaling
+  // phases with no flush and no compaction in the way, which is the
+  // writer queue on its own.  Both are worth seeing, and they differ.
+  int write_buffer_mb = 4;
   bool use_sqlite = true;
 };
 
@@ -319,6 +325,7 @@ double reads_with_threads(DB* db, const Config& config, int threads,
 struct LogWrites {
   uint64_t records = 0;
   uint64_t batches = 0;
+  uint64_t parked = 0;  // writers that slept for their turn
 };
 
 LogWrites log_writes(DB* db) {
@@ -331,6 +338,7 @@ LogWrites log_writes(DB* db) {
   while (lines >> what >> n) {
     if (what == "records") out.records = n;
     if (what == "batches") out.batches = n;
+    if (what == "parked") out.parked = n;
   }
   return out;
 }
@@ -373,13 +381,19 @@ uint64_t write_scaling_row(DB* db, const Config& config, int threads,
   const double writes = static_cast<double>(threads) *
                         static_cast<double>(per_thread);
   const uint64_t records = after.records - before.records;
-  std::printf("      %-8d %9.0f write/s   %6.2f batches per log write%s\n",
+  // Beside the group size, the share of writes that slept for their turn:
+  // a writer that is not at the front watches for the leader to finish
+  // before it parks, and this says how often the watching was enough.
+  std::printf("      %-8d %9.0f write/s   %6.2f batches per log write%s   "
+              "%5.1f%% parked\n",
               threads, writes / seconds,
               records == 0 ? 0.0
                            : static_cast<double>(after.batches -
                                                  before.batches) /
                                  static_cast<double>(records),
-              sync ? " and fsync" : "");
+              sync ? " and fsync" : "",
+              100.0 * static_cast<double>(after.parked - before.parked) /
+                  writes);
   return handed;
 }
 
@@ -459,7 +473,8 @@ void bench_ambar(const Config& config) {
   options.create_if_missing = true;
   options.filter_policy = policy.get();
   options.block_cache = cache.get();
-  options.write_buffer_size = 4 << 20;
+  options.write_buffer_size = static_cast<size_t>(config.write_buffer_mb)
+                              << 20;
 
   std::unique_ptr<DB> db;
   const Status status = DB::open(options, path, &db);
@@ -842,6 +857,8 @@ int main(int argc, char** argv) {
       config.cache_mb = std::atoi(argv[++i]);
     } else if (arg == "--threads" && i + 1 < argc) {
       config.threads = std::max(1, std::atoi(argv[++i]));
+    } else if (arg == "--write-buffer-mb" && i + 1 < argc) {
+      config.write_buffer_mb = std::max(1, std::atoi(argv[++i]));
     } else if (arg == "--no-sqlite") {
       config.use_sqlite = false;
     } else if (arg[0] != '-') {
@@ -852,8 +869,10 @@ int main(int argc, char** argv) {
   std::filesystem::create_directories(config.dir);
 
   std::printf("ambar benchmark\n");
-  std::printf("  %d keys, %d-byte values, %d MB block cache, %.0f MB of user "
-              "data\n", config.keys, config.value_size, config.cache_mb,
+  std::printf("  %d keys, %d-byte values, %d MB block cache, %d MB memtable, "
+              "%.0f MB of user data\n",
+              config.keys, config.value_size, config.cache_mb,
+              config.write_buffer_mb,
               static_cast<double>(config.keys) *
                   static_cast<double>(config.value_size + 16) / 1048576.0);
   std::printf("\n  These numbers describe this machine and this filesystem.\n"

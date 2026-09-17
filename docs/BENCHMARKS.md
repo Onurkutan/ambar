@@ -345,7 +345,8 @@ machine doing other things; the table is the first of the three.
 ### Without sync
 
 The same phase with `sync` off, 50,000 writes per thread, is the other half
-of the answer, and it is not a flattering one:
+of the answer. As first measured, with every waiting writer parking on its
+condition variable at once, it was not a flattering one:
 
 | threads | writes/s | | batches per log write |
 |---|---|---|---|
@@ -354,26 +355,63 @@ of the answer, and it is not a flattering one:
 | 4 | 86,000 | ×0.54 | 2.14 |
 | 8 | 88,000 | ×0.56 | 4.29 |
 
-Two threads write at less than half the rate of one, and eight never get
-back to it. The grouping still happens — the last column climbs as it did
-with `sync` — but there is nothing left for it to save: a log append costs
-a few microseconds where an `fsync` cost six hundred, and what a group
-costs is now the larger number. A writer that is not at the front of the
-queue parks on its own condition variable; the leader writes the group,
-then wakes each member in turn and the next leader after them, and every
-one of those wake-ups is a context switch that the single thread, which
-never queues, never pays. Without `sync` the queue is the price of the
-design with nothing to hide behind, and on this machine the price is a
-factor of two.
+Two threads wrote at less than half the rate of one, and eight never got
+back to it. The grouping still happened — the last column climbs as it did
+with `sync` — but there was nothing left for it to save: a log append costs
+a few microseconds where an `fsync` cost six hundred, and what a group cost
+was now the larger number. A writer that was not at the front parked on its
+own condition variable; the leader wrote the group, then woke each member
+in turn and the next leader after them, and every one of those wake-ups was
+a context switch that the single thread, which never queues, never pays.
 
-That is a finding about the writer queue, not about the log or the
-memtable — one thread reaches 158,000 writes a second through both — and
-the remedy is known: let a queued writer spin briefly before it parks, and
-wake the group with one call rather than one per member. It is not done
-here. Three runs put the single-thread row between 110,000 and 187,000,
-since a phase bound by the CPU moves with whatever else the machine is
-doing, and the two-thread row between 71,000 and 86,000; the shape held in
-all three, and the table is the first.
+So a waiting writer now watches its state for fifty microseconds before it
+parks, and is nearly always answered in that time; `docs/DESIGN.md` says
+how. The same rows, with the engine as the benchmark configures it — a 4 MB
+memtable, so that flushes and compaction run through the phase — and with
+the share of writers that still had to park:
+
+| threads | writes/s | | batches per log write | parked |
+|---|---|---|---|---|
+| 1 | 164,000 | ×1.00 | 1.00 | 0.0 % |
+| 2 | 115,000 | ×0.70 | 1.01 | 0.3 % |
+| 4 | 127,000 | ×0.77 | 2.04 | 1.1 % |
+| 8 | 92,000 | ×0.56 | 4.26 | 3.3 % |
+
+The parking is gone — three writers in a hundred sleep, where every one of
+them did — and two threads recovered from 0.45× to 0.70×, but eight did
+not move. That is not the queue any more. With a 64 MB memtable, so that
+the phase runs with no flush and no compaction in the way, the same
+benchmark gives:
+
+| threads | writes/s | | batches per log write | parked |
+|---|---|---|---|---|
+| 1 | 197,000 | ×1.00 | 1.00 | 0.0 % |
+| 2 | 154,000 | ×0.78 | 1.01 | 0.3 % |
+| 4 | 213,000 | ×1.08 | 2.04 | 1.2 % |
+| 8 | 261,000 | ×1.32 | 4.31 | 2.4 % |
+
+Eight threads write a third faster than one, four threads a little faster,
+and the queue does what it was built to do: the append and its `flush`
+are shared across a group of four. What the 4 MB rows show on top of that
+is compaction — eight writers fill a memtable every fifth of a second, and
+the background thread that flushes and compacts it takes a core, a share
+of the mutex, and the writers' time through backpressure — and that is a
+cost of the engine's configuration, not of its queue.
+
+Two threads write below one in both tables, and a probe that timed the
+leader's own work said why: with one thread spinning beside it, the
+leader's four-microsecond append and insert took six, from sharing cache
+lines and, on a hyperthreaded core, a pipeline, and a group of one batch
+amortises nothing against that. A yield in place of the pause was tried
+and was slower at every count. Below four threads the queue costs more
+than it saves without `sync`, and the engine is not tuned around that:
+a single writer is the case the design is for.
+
+Three runs at 4 MB put the eight-thread row between 84,000 and 112,000
+and the two-thread row between 109,000 and 134,000; two runs at 64 MB put
+the eight-thread row at 260,000 and 261,000, and the single-thread row,
+which moves most with the machine's load, at 179,000 and 216,000. The
+tables are medians.
 
 ## What is not measured
 

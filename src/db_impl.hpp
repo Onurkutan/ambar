@@ -80,6 +80,17 @@ class DBImpl final : public DB {
   // lock held; may release and reacquire it.
   Status make_room_for_write(bool force);
 
+  // Waits for `writer` to be answered by a leader or to become the leader.
+  // Called with mutex_ held.  Returns with the writer's state no longer
+  // kWaiting, and with the mutex held unless the writer was answered while
+  // it watched without it -- an answered writer has nothing left to do
+  // under the mutex, and taking it back would mean queueing on the leader.
+  // With `spin`, the mutex is released and the state watched for a few
+  // tens of microseconds before the writer parks on its condition variable
+  // -- see the comment at the definition for why.
+  void await_turn(Writer* writer, std::unique_lock<std::mutex>& lock,
+                  bool spin);
+
   // Collects the batches queued behind `first` into one, so a group of writers
   // shares a single log record and a single fsync.
   WriteBatch* build_batch_group(Writer** last_writer);
@@ -169,6 +180,11 @@ class DBImpl final : public DB {
   // get_property("ambar.log-writes") reports both; tools/bench divides.
   uint64_t log_writes_ = 0;
   uint64_t batches_written_ = 0;
+  // Writers that parked on their condition variable rather than being
+  // answered while they spun; over batches_written_, the share of writes
+  // that paid a context switch to wait.  What says whether the spin in
+  // await_turn is doing its job.
+  uint64_t writers_parked_ = 0;
   uint64_t flush_bytes_ = 0;       // tables written from memtables
   uint64_t compaction_bytes_ = 0;  // tables written by compactions
 

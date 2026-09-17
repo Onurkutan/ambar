@@ -191,15 +191,24 @@ suspect, an allocation per lookup in the block cache, was removed and made
 no difference, which the benchmark said before anyone could claim
 otherwise; `docs/BENCHMARKS.md` says where the rest of the gap is.
 
-**A writer queue that costs more than it saves when there is nothing to
+**A writer queue that cost more than it saved when there was nothing to
 save.** Group commit shares one `fsync` between every writer queued behind
 a leader, and with `sync` it does what it promises: eight threads write at
 4.7 times one thread's rate, each `fsync` carrying nearly five batches.
-Without `sync` the same queue makes two threads write at *half* the rate of
-one, and eight never catch up, because a parked writer's wake-up is a
+Without `sync` the same queue made two threads write at *half* the rate of
+one, and eight never caught up, because a parked writer's wake-up is a
 context switch that costs more than the log append it was waiting for.
-Found the day the benchmark ran the unsynced case; the remedy is known and
-is not done yet.
+Found the day the benchmark ran the unsynced case. A waiting writer now
+watches for its answer for fifty microseconds before it sleeps, and three
+in a hundred still have to. With the memtable large enough that compaction
+stays out of the way, eight threads write a third faster than one; at the
+benchmark's own 4 MB they are still at half, and the rows say so, because
+what they measure there is compaction competing with eight writers, which
+is a different cost. The engine counts the writers that parked, so the
+benchmark says whether the watching works rather than assuming it; and
+since a writer answered while it watched returns without the mutex, a
+leader that touched one afterwards would read a dead stack frame, which
+the AddressSanitizer job now runs with the detection to catch.
 
 **And several claims that were simply wrong.** The design document said, as
 such documents usually do, that the log record must precede the memtable insert

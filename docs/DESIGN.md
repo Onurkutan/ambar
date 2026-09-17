@@ -115,16 +115,44 @@ time the two numbers are equal, and from eight threads at once every batch
 is counted exactly once.
 
 The queue has a price, and without `sync` there is nothing to hide it
-behind. A writer that is not at the front parks on a condition variable;
-the leader wakes each member of its group in turn, and the next leader
-after them, and each wake-up is a context switch that a lone writer never
-pays. With `sync` the flush is six hundred microseconds and the switches
-vanish into it; without, a log append is a few microseconds and the
-switches are the cost. Measured: two unsynced threads write at less than
-half the rate of one, and eight never get back to it, while the groups
-they form are as large as ever. The remedy — a brief spin before parking,
-one wake-up per group rather than one per member — is known and not done;
-`docs/BENCHMARKS.md` has the table.
+behind. A writer that is not at the front used to park on its condition
+variable at once, and the leader woke each member of its group in turn and
+the next leader after them; every wake-up is a context switch that a lone
+writer never pays. With `sync` the flush is six hundred microseconds and
+the switches vanish into it; without, a log append is a few microseconds
+and the switches are the cost. Measured: two unsynced threads wrote at less
+than half the rate of one, and eight never got back to it, while the groups
+they formed were as large as ever.
+
+So a writer that is not at the front now watches for its answer before it
+sleeps. Its state — waiting, parked, done, or promoted to leader — is one
+atomic word that the leader publishes and the writer reads with the mutex
+released, pausing the core between looks, for fifty microseconds: two or
+three unsynced groups' worth, so that a writer queued behind one is nearly
+always answered without sleeping, and short enough that followers of a
+leader blocked by backpressure burn no more than that each. Only then does
+it park, and the transition is under the mutex, as is the leader's
+exchange-and-notify, so there is no window in which the leader sees a
+waiting writer, skips the wake-up, and leaves it asleep. The leader's
+exchange is its last touch of a member: a spinning member may return from
+`write()` and destroy its `Writer` — which lives on the caller's stack —
+the instant its state changes, so the leader decides whether the member was
+the last of the group *before* releasing it, and the AddressSanitizer job
+runs with stack-use-after-return detection on to hold that line. Behind a
+synced leader, or behind the batchless write `compact_range` makes, a
+follower parks at once: the leader is in `fsync` for hundreds of
+microseconds, or rotating the log with two syncs of its own, and spinning
+eight cores at a device is waste. The engine counts the writers that
+parked, and `tools/bench` prints the share beside each row.
+
+Spinning is not free either, and the benchmark says where it stops paying:
+with two threads the follower slows the leader by sharing its cache lines
+and, on a hyperthreaded core, its pipeline, and a four-microsecond write
+has nothing to amortise that against — two threads still write below one.
+From four threads groups form, the append and its `flush` are shared, and
+the queue is worth more than it costs. `docs/BENCHMARKS.md` has the rows
+before and after; a yield in place of the pause was tried and was slower
+at every count.
 
 ## The read path
 
@@ -744,8 +772,10 @@ which file it sits in.
   with the database on disk and with it resident, which is what found the
   two locks described under *Concurrency* above; and synced writes on one
   to eight threads beside the batches each `fsync` carried, which is what
-  *Group commit* above promises. Compared against SQLite in WAL mode where
-  it is available.
+  *Group commit* above promises, with and without `sync`, and with the
+  memtable sized so that compaction runs through the phase or stays out of
+  it (`--write-buffer-mb`), since the two answers differ. Compared against
+  SQLite in WAL mode where it is available.
 * `tools/fault_sweep.sh` with `tools/fault_inject.c` — makes one `fsync` or
   `rename` return `EIO`, at each point in a workload where one occurs, through
   the real system calls, and checks the database still opens and still holds

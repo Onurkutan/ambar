@@ -319,6 +319,12 @@ TEST(stats, counts_the_batches_each_log_write_carried) {
   CHECK_EQ(batches, uint64_t{kThreads * kPerThread});
   CHECK(records >= 1);
   CHECK(records <= batches);
+  // Behind a synced leader a follower parks at once rather than watching,
+  // so every batch that rode another's record was a writer that slept:
+  // parked is at least batches less records.  Written one at a time, above,
+  // nobody had anyone to wait for.
+  CHECK_EQ(at(serial, "parked"), uint64_t{0});
+  CHECK(at(grouped, "parked") >= batches - records);
   std::printf("    %llu writes from %d threads went to the log in %llu "
               "records: %.2f batches per record\n",
               ull(batches), kThreads, ull(records),

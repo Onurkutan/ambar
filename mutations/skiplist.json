@@ -1,6 +1,5 @@
 {
-  "_comment": "Concurrency faults. Run against a ThreadSanitizer build: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DAMBAR_SANITIZE=thread, then apply one of these by hand and run ./build-tsan/ambar_tests -v. tools/mutate.py drives ./build, so point it at a TSan build directory or apply these manually.",
-
+  "_comment": "Concurrency faults. Run against a ThreadSanitizer build: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DAMBAR_SANITIZE=thread, then apply one of these by hand and run ./build-tsan/ambar_tests -v. The two group-commit entries are use-after-return of a Writer on a caller's stack -- a member answered while it watched returns from write() without the mutex, so the frame can be gone the instant its state changes -- and a data race on its status; an AddressSanitizer build with ASAN_OPTIONS=detect_stack_use_after_return=1, as CI runs it, reports the first when the member wins the race, and ThreadSanitizer reports the second. tools/mutate.py drives ./build, so point it at a sanitizer build directory or apply these manually.",
   "skiplist: publish a node with a relaxed store": [
     "src/skiplist.hpp",
     "next_[level].store(node, std::memory_order_release);",
@@ -25,5 +24,15 @@
     "src/db_impl.cpp",
     "  current->release(&mutex_);\n  return status;",
     "  current->unref();\n  return status;"
+  ],
+  "group commit: read a member's batch after answering it": [
+    "src/db_impl.cpp",
+    "    if (ready->batch != nullptr) ++batches_written_;\n    // Decided before the release: a spinning member may be gone the moment\n    // its state changes, and `ready` must not be read after that.\n    const bool last = ready == last_writer;\n    if (ready != &writer) {\n      ready->status = status;\n      ready->release(Writer::kDone);\n    }\n    if (last) break;",
+    "    const bool last = ready == last_writer;\n    if (ready != &writer) {\n      ready->status = status;\n      ready->release(Writer::kDone);\n    }\n    if (ready->batch != nullptr) ++batches_written_;\n    if (last) break;"
+  ],
+  "group commit: answer a member without publishing its status first": [
+    "src/db_impl.cpp",
+    "      ready->status = status;\n      ready->release(Writer::kDone);",
+    "      ready->release(Writer::kDone);\n      ready->status = status;"
   ]
 }

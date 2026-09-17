@@ -7,6 +7,10 @@
 #include <cstdio>
 #include <vector>
 
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#include <intrin.h>
+#endif
+
 #include "builder.hpp"
 #include "db_iter.hpp"
 #include "filename.hpp"
@@ -74,17 +78,56 @@ Status count_data_files(const std::string& dbname, int* count) {
 // One caller's pending write, and the machinery for handing the work to
 // whichever writer reaches the front of the queue.
 struct DBImpl::Writer {
-  explicit Writer(std::mutex* m) : mutex(m) {}
+  // Where the writer is in its life, published by the leader and watched by
+  // the writer -- with the mutex released, while it spins, which is why the
+  // field is atomic.  The writer moves itself from kWaiting to kParked,
+  // under the mutex, when it gives up spinning; the leader moves it from
+  // either to kDone (its batch was in the group) or kLeader (it is at the
+  // front now), and the previous value tells the leader whether anyone is
+  // asleep to wake.
+  enum State : int { kWaiting, kParked, kDone, kLeader };
 
   Status status;
   WriteBatch* batch = nullptr;
   bool sync = false;
-  bool done = false;
+  std::atomic<int> state{kWaiting};
   std::condition_variable condition;
-  std::mutex* mutex;
+
+  // The leader's last touch of a writer it is answering or promoting,
+  // made with the mutex held.  A writer that was spinning may return from
+  // write() and destroy itself the instant the exchange lands, so nothing
+  // may touch it afterwards; a writer that had parked is inside
+  // condition.wait(lock), needs the mutex the leader holds to get out, and
+  // is woken here.
+  void release(int new_state) {
+    if (state.exchange(new_state, std::memory_order_acq_rel) == kParked) {
+      condition.notify_one();
+    }
+  }
 };
 
 namespace {
+
+// What a spinning thread does between two looks at the state: on x86 a
+// pause, which keeps the core from speculating past the loop and lets a
+// sibling hyperthread run; elsewhere a yield.
+inline void cpu_relax() {
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+  _mm_pause();
+#elif defined(__x86_64__) || defined(__i386__)
+  __builtin_ia32_pause();
+#else
+  std::this_thread::yield();
+#endif
+}
+
+// How long a writer watches its state before parking.  Sized to cover an
+// unsynced group -- a few microseconds of log append and memtable insert,
+// times the few batches a group holds -- two or three times over, so that
+// a writer queued behind one is nearly always answered without sleeping;
+// and short enough that a leader blocked for a millisecond by backpressure
+// costs its followers no more than this each.
+constexpr std::chrono::microseconds kWriterSpin{50};
 
 int64_t micros_since(std::chrono::steady_clock::time_point start) {
   return std::chrono::duration_cast<std::chrono::microseconds>(
@@ -491,18 +534,26 @@ Status DBImpl::del(const WriteOptions& options, std::string_view key) {
 }
 
 Status DBImpl::write(const WriteOptions& options, WriteBatch* updates) {
-  Writer writer(&mutex_);
+  Writer writer;
   writer.batch = updates;
   writer.sync = options.sync;
 
   std::unique_lock<std::mutex> lock(mutex_);
   writers_.push_back(&writer);
-  while (!writer.done && &writer != writers_.front()) {
-    writer.condition.wait(lock);
-  }
-  if (writer.done) {
-    // Someone else's group included this batch and reported its result.
-    return writer.status;
+  if (&writer != writers_.front()) {
+    // Spinning only pays behind a leader whose group will be over in
+    // microseconds.  Behind a synced write the leader is in fsync for
+    // hundreds of them, and behind the batchless write compact_range makes
+    // it may be rotating the log, with two syncs of its own; a follower of
+    // either parks at once rather than burn a core waiting for a device.
+    const Writer* front = writers_.front();
+    const bool spin = !front->sync && front->batch != nullptr;
+    await_turn(&writer, lock, spin);
+    if (writer.state.load(std::memory_order_acquire) == Writer::kDone) {
+      // Someone else's group included this batch and reported its result.
+      return writer.status;
+    }
+    // Promoted: the previous leader made this writer the front.
   }
 
   Status status = make_room_for_write(updates == nullptr);
@@ -594,17 +645,72 @@ Status DBImpl::write(const WriteOptions& options, WriteBatch* updates) {
     Writer* ready = writers_.front();
     writers_.pop_front();
     if (ready->batch != nullptr) ++batches_written_;
+    // Decided before the release: a spinning member may be gone the moment
+    // its state changes, and `ready` must not be read after that.
+    const bool last = ready == last_writer;
     if (ready != &writer) {
       ready->status = status;
-      ready->done = true;
-      ready->condition.notify_one();
+      ready->release(Writer::kDone);
     }
-    if (ready == last_writer) break;
+    if (last) break;
   }
-  if (!writers_.empty()) {
-    writers_.front()->condition.notify_one();
-  }
+  if (!writers_.empty()) writers_.front()->release(Writer::kLeader);
   return status;
+}
+
+void DBImpl::await_turn(Writer* writer, std::unique_lock<std::mutex>& lock,
+                        bool spin) {
+  // A writer that is not at the front used to park on its condition
+  // variable at once, and the leader woke each member of its group in
+  // turn.  Every one of those wake-ups is a context switch, and without a
+  // sync there is nothing to hide it behind: the log append the member was
+  // waiting for costs a few microseconds and the switch costs more, so
+  // that two unsynced writers ran at less than half the rate of one --
+  // tools/bench measured it, and docs/BENCHMARKS.md has the table.  So a
+  // writer first watches its state with the mutex released, for long
+  // enough that a group in progress finishes, and parks only if it is
+  // still waiting after that.
+  if (spin) {
+    lock.unlock();
+    const auto deadline = std::chrono::steady_clock::now() + kWriterSpin;
+    for (int i = 1;
+         writer->state.load(std::memory_order_acquire) == Writer::kWaiting;
+         ++i) {
+      cpu_relax();
+      // The clock is read every few dozen spins rather than every one: it
+      // costs more than the pause does.
+      if ((i & 31) == 0 && std::chrono::steady_clock::now() >= deadline) {
+        break;
+      }
+    }
+    // A writer answered while it watched returns without the mutex: the
+    // leader still holds it, through the rest of its group and the next
+    // leader's promotion, and a member that took it back would queue on it
+    // -- on a mutex that parks at the first failed try, which glibc's
+    // does, that is the context switch the watching was meant to avoid,
+    // uncounted.  Its status was published before its state was, so it
+    // needs nothing the mutex guards.  A writer promoted to leader does
+    // need the mutex, and takes it here.
+    if (writer->state.load(std::memory_order_acquire) == Writer::kDone) {
+      return;
+    }
+    lock.lock();
+  }
+  if (writer->state.load(std::memory_order_acquire) != Writer::kWaiting) {
+    return;
+  }
+  // Still waiting, and about to sleep.  The move to kParked and the wait
+  // are both under the mutex, as is the leader's exchange and notify, so
+  // there is no window in which the leader can see kWaiting, skip the
+  // notify, and leave this writer asleep: either the leader's exchange
+  // came first, and the load above saw its result, or this store came
+  // first, and the leader sees kParked and wakes the condition variable
+  // that wait() is about to release the mutex into.
+  ++writers_parked_;
+  writer->state.store(Writer::kParked, std::memory_order_relaxed);
+  while (writer->state.load(std::memory_order_acquire) == Writer::kParked) {
+    writer->condition.wait(lock);
+  }
 }
 
 WriteBatch* DBImpl::build_batch_group(Writer** last_writer) {
@@ -1594,7 +1700,8 @@ bool DBImpl::get_property(std::string_view property, std::string* value) {
 
   if (name == "log-writes") {
     *value = "records " + std::to_string(log_writes_) + "\n" +
-             "batches " + std::to_string(batches_written_) + "\n";
+             "batches " + std::to_string(batches_written_) + "\n" +
+             "parked " + std::to_string(writers_parked_) + "\n";
     return true;
   }
 

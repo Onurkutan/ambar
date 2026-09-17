@@ -72,10 +72,15 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DAMBAR_SANITIZE=address
       - run: cmake --build build
+      # detect_stack_use_after_return is for the writer queue: a Writer
+      # lives on its caller's stack, and a leader that touched one after
+      # answering it -- when the caller may already have returned -- would
+      # read a dead frame.  The argument that it never does is in
+      # src/db_impl.cpp; this is what checks the argument.
       - name: Test
         env:
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-          ASAN_OPTIONS: detect_leaks=1
+          ASAN_OPTIONS: detect_leaks=1:detect_stack_use_after_return=1
         run: ./build/ambar_tests -v
 
       # Damaged and hostile files, specifically. A table file is untrusted
