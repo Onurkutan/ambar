@@ -793,9 +793,17 @@ which file it sits in.
 Stated so that the absence is a decision rather than an omission a reader has
 to discover.
 
-* **Compression.** The block trailer reserves a type byte and the reader
-  refuses a type it cannot handle, so adding it later does not change the
-  format for existing files. Nothing compresses today.
+* **Compression, in the engine.** The block trailer reserves a type byte and
+  the reader refuses a type it cannot handle, so adding it later does not
+  change the format for existing files. The codec exists — `src/compress.hpp`
+  is an LZ77 coder in the shape of LZ4, written here rather than taken from
+  a library because its decoder is a parser of untrusted bytes and every
+  such parser in this project is its own, fuzzed, and bounded at every read;
+  `tests/test_compress.cpp` overruns each of its checks by hand and
+  `mutations/compress.json` removes each in turn — but no block is written
+  compressed yet. Wiring it into the table format is a change to the format,
+  and so to the minor version, and comes with its own measurement of what
+  it costs a read and saves on disk.
 * **Parallel compaction.** One background thread. Compaction is IO bound and
   its inputs and outputs are ordered with respect to each other, so a second
   thread would mostly contend for the same lock; doing it properly needs

@@ -76,6 +76,7 @@ add_library(ambar
   src/format.cpp
   src/block_builder.cpp
   src/block.cpp
+  src/compress.cpp
   src/filter_block.cpp
   src/two_level_iterator.cpp
   src/table_builder.cpp
@@ -108,6 +109,7 @@ add_executable(ambar_tests
   tests/test_write_batch.cpp
   tests/test_bloom.cpp
   tests/test_cache.cpp
+  tests/test_compress.cpp
   tests/test_filter_block.cpp
   tests/test_hash.cpp
   tests/test_table.cpp
@@ -164,7 +166,8 @@ endif()
 if(AMBAR_FUZZ)
   add_custom_target(fuzzers)
 
-  foreach(name IN ITEMS version_edit block filter_block write_batch table wal)
+  foreach(name IN ITEMS version_edit block filter_block write_batch table wal
+                        compress)
     add_executable(fuzz_${name} fuzz/fuzz_${name}.cpp)
     target_link_libraries(fuzz_${name} PRIVATE ambar Threads::Threads)
     target_include_directories(fuzz_${name} PRIVATE src)

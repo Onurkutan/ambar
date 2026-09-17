@@ -1,0 +1,48 @@
+{
+  "_comment": "The block decoder's bounds checks, removed one at a time. tests/test_compress.cpp hands the decoder streams built by hand to overrun each one -- a length past the declared size, a token claiming more literals than the input holds, an offset before the start, a stream cut off inside a sequence -- and requires not just a corruption status but the one that check produces, since a check that is gone can leave a later check to refuse the stream after the out-of-bounds read has already happened. The encoder is covered by the round trips. Not here: the in-loop room check in read_extra, which only stops a run of 255s early; with it gone the post-check refuses the same streams with a different message, so a mutant is equivalent for the decoder's answer and the check is defence in depth.",
+  "decoder: accept literals past the declared size": [
+    "src/compress.cpp",
+    "    if (literal_count > room) {\n      return Status::corruption(\"literals overrun the declared size\");\n    }",
+    "    ;"
+  ],
+  "decoder: read literals past the end of the input": [
+    "src/compress.cpp",
+    "    if (static_cast<size_t>(end - p) < literal_count) {\n      return Status::corruption(\"literals overrun the compressed input\");\n    }",
+    "    ;"
+  ],
+  "decoder: accept an offset before the start": [
+    "src/compress.cpp",
+    "    if (offset == 0 || offset > output->size()) {",
+    "    if (offset == 0) {"
+  ],
+  "decoder: accept an offset of zero": [
+    "src/compress.cpp",
+    "    if (offset == 0 || offset > output->size()) {",
+    "    if (offset > output->size()) {"
+  ],
+  "decoder: accept a match past the declared size": [
+    "src/compress.cpp",
+    "    if (match_length > match_room) {\n      return Status::corruption(\"match overruns the declared size\");\n    }",
+    "    ;"
+  ],
+  "decoder: accept a stream that delivers less than it declares": [
+    "src/compress.cpp",
+    "      if (output->size() != total) {\n        return Status::corruption(\n            \"compressed block delivers less than it declares\");\n      }",
+    "      ;"
+  ],
+  "encoder: miscount the extended literal length": [
+    "src/compress.cpp",
+    "  if (literal_count >= 15) put_length(out, literal_count - 15);",
+    "  if (literal_count >= 15) put_length(out, literal_count - 14);"
+  ],
+  "encoder: write the offset with its bytes swapped": [
+    "src/compress.cpp",
+    "  out->push_back(static_cast<char>(offset & 0xff));\n  out->push_back(static_cast<char>((offset >> 8) & 0xff));",
+    "  out->push_back(static_cast<char>((offset >> 8) & 0xff));\n  out->push_back(static_cast<char>(offset & 0xff));"
+  ],
+  "decoder: reserve whatever the stream declares": [
+    "src/compress.cpp",
+    "  if (total > 255 * input.size()) {\n    return Status::corruption(\n        \"compressed block declares more than its bytes could deliver\");\n  }",
+    "  ;"
+  ]
+}

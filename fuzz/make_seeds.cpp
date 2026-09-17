@@ -23,6 +23,7 @@
 #include "ambar/write_batch.hpp"
 #include "block_builder.hpp"
 #include "comparator.hpp"
+#include "compress.hpp"
 #include "dbformat.hpp"
 #include "file.hpp"
 #include "filter_block.hpp"
@@ -164,6 +165,35 @@ bool seed_wal(const std::filesystem::path& root) {
   return writer.sync().is_ok() && writer.close().is_ok();
 }
 
+// Compressed blocks of the three shapes the encoder produces: one with
+// matches at every length nibble, one that is a single run (an overlapping
+// match), and one that is all literals.
+bool seed_compress(const std::filesystem::path& root) {
+  const std::filesystem::path dir = seed_dir(root, "compress");
+  std::string block;
+  for (int i = 0; i < 60; ++i) {
+    block += key_of(i) + "=value_" + std::to_string(i) + "_";
+    block.append(static_cast<size_t>(i % 40), static_cast<char>('a' + i % 26));
+  }
+  std::string compressed;
+  compress_block(block, &compressed);
+  bool ok = write_bytes(dir / "block", compressed);
+
+  compressed.clear();
+  compress_block(std::string(5000, 'r'), &compressed);
+  ok = write_bytes(dir / "run", compressed) && ok;
+
+  std::string noise;
+  uint32_t x = 0x9e3779b9u;
+  for (int i = 0; i < 700; ++i) {
+    x = x * 1664525u + 1013904223u;
+    noise.push_back(static_cast<char>(x >> 24));
+  }
+  compressed.clear();
+  compress_block(noise, &compressed);
+  return write_bytes(dir / "literals", compressed) && ok;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -177,7 +207,7 @@ int main(int argc, char** argv) {
   const bool ok = seed_version_edit(root) && seed_block(root) &&
                   seed_filter_block(root, policy.get()) &&
                   seed_write_batch(root) && seed_table(root, policy.get()) &&
-                  seed_wal(root);
+                  seed_wal(root) && seed_compress(root);
   if (!ok) {
     std::fprintf(stderr, "could not write every seed under %s\n", argv[1]);
     return 1;

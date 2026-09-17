@@ -12,6 +12,7 @@ pass; it does not say they would notice a bug, and those are different claims.
     python3 tools/mutate.py mutations/faults.json
     python3 tools/mutate.py mutations/stats.json
     python3 tools/mutate.py mutations/cache.json
+    python3 tools/mutate.py mutations/compress.json
 
 Each mutation is applied to the source, the project is rebuilt, the unit suite
 is run, and the script reports which tests noticed. The original file is
@@ -24,6 +25,22 @@ Two sets do not work that way, and the script cannot run them:
   them through `mutate.py` would run the unit suite, which cannot see them.
 * **`skiplist.json`** — data races. Apply one by hand to a ThreadSanitizer
   build and run that binary; a race is a report, not a failed assertion.
+
+## A mutation that survived, and what it taught
+
+`compress.json` removes each bounds check in the block decoder in turn. The
+first draft of `tests/test_compress.cpp` handed the decoder a stream built
+to overrun each check and required a corruption status -- and three of the
+removals survived it. Not because the stream was accepted: because a
+*later* check refused it. A token that claims six literals when the input
+holds four, with room to spare in the declared size, is caught by the input
+bound; with that bound gone, the copy reads two bytes past the end and then
+the size check at the end of the stream refuses the result anyway. The test
+saw a refusal and was satisfied, and the out-of-bounds read had already
+happened -- which only a sanitizer build would have seen. The tests now
+require the refusal to come from the check the stream was built to hit,
+by its message, and every removal is caught on every platform. A refusal
+test that checks only "refused" is weaker than it looks.
 
 ## Mutations expected to survive
 

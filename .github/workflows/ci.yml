@@ -142,8 +142,9 @@ jobs:
 
   # Everything above feeds the engine files it wrote itself, or files damaged
   # by hand in ways somebody thought of.  This feeds each parser of untrusted
-  # bytes -- table, block, filter, log, batch, manifest -- inputs nobody thought
-  # of, under ASan and UBSan, starting from a valid example of each format.
+  # bytes -- table, block, filter, log, batch, manifest, compressed block --
+  # inputs nobody thought of, under ASan and UBSan, starting from a valid
+  # example of each format.
   #
   # A minute per target is a smoke test, not a campaign: it catches the
   # shallow bugs and any regression in the deep ones a longer local run found.
@@ -171,7 +172,7 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
         run: |
           mkdir -p crashes
-          for target in version_edit block filter_block write_batch table wal; do
+          for target in version_edit block filter_block write_batch table wal compress; do
             echo "::group::fuzz_$target"
             ./build/fuzz_$target \
               -max_total_time=60 -max_len=16384 -timeout=20 \

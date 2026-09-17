@@ -235,7 +235,7 @@ engine, and the comment says what still is not.
     cmake --build build
     ./build/ambar_tests
 
-226 tests, no external framework. Also:
+234 tests, no external framework. Also:
 
     cmake -S . -B build-asan -DAMBAR_SANITIZE=address   # ASan + UBSan
     cmake -S . -B build-tsan -DAMBAR_SANITIZE=thread    # ThreadSanitizer
@@ -286,9 +286,9 @@ under `LD_PRELOAD`, is kept for the real syscall path:
 
 **Fuzzing.** The corruption suite damages files in ways somebody thought of.
 This hands each parser of untrusted bytes — table, block, filter block, log,
-write batch, manifest — inputs nobody thought of, under ASan and UBSan,
-starting from a valid example of each format that the engine's own writers
-produce. Needs clang, which is where libFuzzer lives.
+write batch, manifest, compressed block — inputs nobody thought of, under
+ASan and UBSan, starting from a valid example of each format that the
+engine's own writers produce. Needs clang, which is where libFuzzer lives.
 
     CC=clang CXX=clang++ cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DAMBAR_FUZZ=ON
     cmake --build build-fuzz --target fuzzers
