@@ -1,8 +1,8 @@
 {
-  "hash: return the raw state instead of the finalized high half": [
+  "hash: return the raw state instead of the finalized value": [
     "src/hash.hpp",
-    "  return static_cast<uint32_t>(fmix64(h) >> 32);",
-    "  return static_cast<uint32_t>(h >> 32);"
+    "  h *= kPrime;\n  return fmix64(h);",
+    "  h *= kPrime;\n  return h;"
   ],
   "hash: drop the per-word shift-xor": [
     "src/hash.hpp",

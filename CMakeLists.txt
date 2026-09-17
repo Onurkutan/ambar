@@ -107,6 +107,7 @@ add_executable(ambar_tests
   tests/test_memtable.cpp
   tests/test_write_batch.cpp
   tests/test_bloom.cpp
+  tests/test_cache.cpp
   tests/test_filter_block.cpp
   tests/test_hash.cpp
   tests/test_table.cpp

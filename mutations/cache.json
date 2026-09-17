@@ -1,0 +1,18 @@
+{
+  "_comment": "The block cache's hash-keyed table: the chain walk, the unlink on remove, and the replace-in-place, each broken in turn. tests/test_cache.cpp drives the cache through its public interface, and its last test brings a pair of sixteen-byte keys with the same 64-bit hash -- found by cycle-finding over hash64, pinned because the filters on disk fix the hash -- so a chain of two exists and comparing only its head is caught.",
+  "table: compare only the head of the chain": [
+    "src/cache.cpp",
+    "    for (LRUEntry* entry = it->second; entry != nullptr;\n         entry = entry->hash_next) {\n      if (entry->key == key) return entry;\n    }\n    return nullptr;",
+    "    return it->second->key == key ? it->second : nullptr;"
+  ],
+  "table: leave a removed entry linked into its chain": [
+    "src/cache.cpp",
+    "      if (*link == entry) {\n        *link = entry->hash_next;\n        entry->hash_next = nullptr;\n        break;\n      }",
+    "      if (*link == entry) {\n        break;\n      }"
+  ],
+  "table: insert a duplicate key beside the old one instead of replacing it": [
+    "src/cache.cpp",
+    "      if ((*link)->key == entry->key) {\n        LRUEntry* old = *link;\n        entry->hash_next = old->hash_next;\n        *link = entry;\n        old->hash_next = nullptr;\n        return old;\n      }",
+    "      if ((*link)->key == entry->key) {\n        break;\n      }"
+  ]
+}

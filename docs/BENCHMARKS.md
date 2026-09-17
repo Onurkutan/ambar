@@ -174,7 +174,7 @@ moment during one. Both figures reproduced byte-identically across runs.
 
 | | written | handed in | amplification |
 |---|---|---|---|
-| ambar | 1,241.6 MB | 219.6 MB | **5.65** |
+| ambar | 1,651.9 MB | 305.2 MB | **5.41** |
 
 Every byte the engine appended to a log, a table or a manifest during the
 write phases above and the full compaction that follows them, against every
@@ -196,22 +196,27 @@ Where the bytes go:
 
 | | MB | per byte handed in |
 |---|---|---|
-| log | 262.0 | 1.19 |
-| flush — tables written from memtables | 224.8 | 1.02 |
-| compaction — tables rewritten on the way down | 754.7 | 3.44 |
+| log | 355.8 | 1.17 |
+| flush — tables written from memtables | 312.1 | 1.02 |
+| compaction — tables rewritten on the way down | 984.0 | 3.22 |
 | manifest | < 0.1 | — |
 
 The denominator is not the 108.7 MB the space row is measured against. The
-benchmark puts every key once in order, once more in random order, and a
-fiftieth of them again with `sync`, and the engine writes each of those, so
-it is 219.6 MB. The log costs 1.19 because each record carries a seven-byte
-header, twelve bytes of batch framing, and a type byte and a length per
-field; the flush
-costs 1.02 because a table holds the same bytes once, with an index and a
-filter on top; and compaction — the part of the trade levelled compaction
-chose to pay — costs 3.4 more as each byte is rewritten on its way down
-through the levels. By level, from a fourth run, whose amplification was
-5.67:
+benchmark puts every key once in order, once more in random order, a
+fiftieth of them again with `sync`, and then the two write-scaling phases
+below make 37,500 and 750,000 writes from several threads over the first
+20,000 and 400,000 keys; the engine writes each of those, so it is
+305.2 MB. The log costs 1.17 because each
+record carries a seven-byte header, twelve bytes of batch framing, and a
+type byte and a length per field — a little less than the 1.19 of a workload
+of single puts, since a group of batches shares one header; the flush costs
+1.02 because a table holds the same bytes once, with an index and a filter
+on top; and compaction — the part of the trade levelled compaction chose to
+pay — costs 3.2 more as each byte is rewritten on its way down through the
+levels. The table by level below is from the workload before the scaling
+phases were added, when the figure was 5.65 on 219.6 MB handed in; it shows
+the shape, which did not change, at the numbers it had then. From one such
+run, whose amplification was 5.67:
 
 | level | files now | size now (MB) | time (s) | read (MB) | written (MB) |
 |---|---|---|---|---|---|
@@ -238,14 +243,15 @@ Measured on a different machine from the tables above — Windows 11 on NTFS,
 an MSVC Release build, the same workload — because the Linux container they
 were taken in is no longer available. The ratio transfers where a throughput
 figure would not: it is decided by the sizes of the memtable and the levels
-and by when compaction ran, not by how fast the disk is. Three runs gave
-5.59, 5.65 and 5.70, and a later one 5.49. The log and flush figures were
-identical in all of them and only compaction varied, because the background
+and by when compaction ran, not by how fast the disk is. On the present
+workload three runs gave 5.33, 5.41 and 5.43; on the earlier one, 5.59,
+5.65 and 5.70, with a later 5.49. The log and flush figures were identical
+within each workload and only compaction varied, because the background
 thread's progress against the writer decides how many level-0 tables each
 compaction picks up; a run made while the machine was also compiling gave
-6.06, the writer having got that much further ahead. There is
-no SQLite figure beside it: SQLite was not built on that machine, and
-counting what it writes would need a hook of its own.
+6.06, the writer having got that much further ahead. There is no SQLite
+figure beside it: SQLite was not built on that machine, and counting what
+it writes would need a hook of its own.
 
 ## Read scaling
 
@@ -282,9 +288,15 @@ acquisition in an experiment gave 1,480,000, and removing it properly — the
 memtables' counts were already atomic, the version's is now, with the last
 reference still dropped under the mutex, and the seek charge only taken when
 a lookup consulted a second file — gave the row above. `docs/DESIGN.md`
-says why the split is sound. What remains is the block cache, sixteen shards
-with a string allocation per lookup, and the memtable probe; neither has
-been measured on its own.
+says why the split is sound. The next suspect was the block cache, whose
+table was keyed by a `std::string` built from the sixteen-byte block key on
+every lookup — an allocation per block, two per point lookup, on MSVC and
+libstdc++ both, whose small-string buffers hold fifteen. The table is keyed
+by the sixty-four-bit hash now and a lookup allocates nothing, and the
+eight-thread rate did not move: 1,420,000 on an idle machine, at the top
+of the 1,270,000 to 1,410,000 the previous form had produced and inside
+its noise. The allocation was real and was not the bottleneck. What remains is the shard lock itself and the memtable
+probe, and neither has been measured on its own.
 
 The eight-thread rate is the steadier of the two figures. Across five runs it
 stayed between 1,270,000 and 1,410,000, while the single-thread rate moved
@@ -330,13 +342,41 @@ figure in this document — the eight-thread row moved between 7,190 and
 is what a phase bound by the device rather than by the CPU looks like on a
 machine doing other things; the table is the first of the three.
 
+### Without sync
+
+The same phase with `sync` off, 50,000 writes per thread, is the other half
+of the answer, and it is not a flattering one:
+
+| threads | writes/s | | batches per log write |
+|---|---|---|---|
+| 1 | 158,000 | ×1.00 | 1.00 |
+| 2 | 71,000 | ×0.45 | 1.30 |
+| 4 | 86,000 | ×0.54 | 2.14 |
+| 8 | 88,000 | ×0.56 | 4.29 |
+
+Two threads write at less than half the rate of one, and eight never get
+back to it. The grouping still happens — the last column climbs as it did
+with `sync` — but there is nothing left for it to save: a log append costs
+a few microseconds where an `fsync` cost six hundred, and what a group
+costs is now the larger number. A writer that is not at the front of the
+queue parks on its own condition variable; the leader writes the group,
+then wakes each member in turn and the next leader after them, and every
+one of those wake-ups is a context switch that the single thread, which
+never queues, never pays. Without `sync` the queue is the price of the
+design with nothing to hide behind, and on this machine the price is a
+factor of two.
+
+That is a finding about the writer queue, not about the log or the
+memtable — one thread reaches 158,000 writes a second through both — and
+the remedy is known: let a queued writer spin briefly before it parks, and
+wake the group with one call rather than one per member. It is not done
+here. Three runs put the single-thread row between 110,000 and 187,000,
+since a phase bound by the CPU moves with whatever else the machine is
+doing, and the two-thread row between 71,000 and 86,000; the shape held in
+all three, and the table is the first.
+
 ## What is not measured
 
 **Anything under memory pressure or with a cold page cache.** Every number here
 was taken with the whole database in the operating system's page cache. Real
 storage latency would change the read figures far more than the write ones.
-
-**Unsynced write scaling.** Without `sync` there is no device flush to
-share, and what several writers cost each other is the queue and the log
-append; not measured, since the read side's two locks were the ones with a
-number to find, and this side's lock is the design.

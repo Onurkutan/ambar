@@ -114,6 +114,18 @@ together is what says the throughput is the grouping and nothing else.
 time the two numbers are equal, and from eight threads at once every batch
 is counted exactly once.
 
+The queue has a price, and without `sync` there is nothing to hide it
+behind. A writer that is not at the front parks on a condition variable;
+the leader wakes each member of its group in turn, and the next leader
+after them, and each wake-up is a context switch that a lone writer never
+pays. With `sync` the flush is six hundred microseconds and the switches
+vanish into it; without, a log append is a few microseconds and the
+switches are the cost. Measured: two unsynced threads write at less than
+half the rate of one, and eight never get back to it, while the groups
+they form are as large as ever. The remedy — a brief spin before parking,
+one wake-up per group rather than one per member — is known and not done;
+`docs/BENCHMARKS.md` has the table.
+
 ## The read path
 
 ```
@@ -421,9 +433,13 @@ reference and drop it, deleting the version under the reader about to read
 its count. No path in this engine can take a reference to a version that is
 no longer current, so the window was not reachable — but a protocol that is
 sound only by that invariant would break the day someone walks the version
-list and takes one, and the form above does not depend on it. The rest of
-the gap is the block cache and the memtable, and `docs/BENCHMARKS.md` says
-what each of the three numbers was.
+list and takes one, and the form above does not depend on it. The block
+cache was the next suspect — its table was keyed by a `std::string` built
+from the block key on every lookup, an allocation per block — and it is
+keyed by the hash now and allocates nothing, and the rate did not move; the
+allocation was real and was not the bottleneck. What remains is the shard
+lock and the memtable, and `docs/BENCHMARKS.md` says what each of the
+numbers was.
 
 The memtable is a skip list with atomic forward pointers: insertion publishes a
 node with a release store, traversal reads with acquire loads, so a concurrent
@@ -694,6 +710,10 @@ which file it sits in.
 
 ## What the tests are for
 
+* `tests/test_cache.cpp` — the block cache through its interface: what it
+  holds, what it replaces, what it evicts and in what order, and what it
+  keeps alive while a reader still holds it. Written when its table was
+  rekeyed by hash; the cache had no test of its own before.
 * `tests/` — unit tests per component, plus model-based tests that drive the
   engine and a `std::map` through tens of thousands of random operations and
   compare every key afterwards, and again after closing and reopening.

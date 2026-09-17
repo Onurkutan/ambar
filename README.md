@@ -186,8 +186,20 @@ committed found the window that protocol admits, where a thread under the
 mutex could take and drop a reference and delete the version under the
 reader; nothing in the engine can take that reference today, and the form
 that replaced it does not need that to stay true. Eight threads read 1.3
-million keys a second from memory now, up from 1.1 million, and
-`docs/BENCHMARKS.md` says where the rest of the gap is.
+million keys a second from memory now, up from 1.1 million. The next
+suspect, an allocation per lookup in the block cache, was removed and made
+no difference, which the benchmark said before anyone could claim
+otherwise; `docs/BENCHMARKS.md` says where the rest of the gap is.
+
+**A writer queue that costs more than it saves when there is nothing to
+save.** Group commit shares one `fsync` between every writer queued behind
+a leader, and with `sync` it does what it promises: eight threads write at
+4.7 times one thread's rate, each `fsync` carrying nearly five batches.
+Without `sync` the same queue makes two threads write at *half* the rate of
+one, and eight never catch up, because a parked writer's wake-up is a
+context switch that costs more than the log append it was waiting for.
+Found the day the benchmark ran the unsynced case; the remedy is known and
+is not done yet.
 
 **And several claims that were simply wrong.** The design document said, as
 such documents usually do, that the log record must precede the memtable insert
@@ -214,7 +226,7 @@ engine, and the comment says what still is not.
     cmake --build build
     ./build/ambar_tests
 
-218 tests, no external framework. Also:
+226 tests, no external framework. Also:
 
     cmake -S . -B build-asan -DAMBAR_SANITIZE=address   # ASan + UBSan
     cmake -S . -B build-tsan -DAMBAR_SANITIZE=thread    # ThreadSanitizer

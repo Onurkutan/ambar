@@ -341,7 +341,7 @@ LogWrites log_writes(DB* db) {
 // its fsync -- carried.  Returns the bytes of key and value handed in, so
 // the caller can keep the amplification's denominator honest.
 uint64_t write_scaling_row(DB* db, const Config& config, int threads,
-                           int per_thread, std::mt19937* rng) {
+                           int per_thread, bool sync, std::mt19937* rng) {
   // Values made up front, on one thread, so the timed region holds only
   // the writes; the generator is not shared between threads.
   std::vector<std::string> values(
@@ -353,7 +353,7 @@ uint64_t write_scaling_row(DB* db, const Config& config, int threads,
   }
 
   WriteOptions sync_options;
-  sync_options.sync = true;
+  sync_options.sync = sync;
   const LogWrites before = log_writes(db);
   std::vector<std::thread> workers;
   const auto start = Clock::now();
@@ -373,13 +373,13 @@ uint64_t write_scaling_row(DB* db, const Config& config, int threads,
   const double writes = static_cast<double>(threads) *
                         static_cast<double>(per_thread);
   const uint64_t records = after.records - before.records;
-  std::printf("      %-8d %9.0f write/s   %6.2f batches per log write and "
-              "fsync\n",
+  std::printf("      %-8d %9.0f write/s   %6.2f batches per log write%s\n",
               threads, writes / seconds,
               records == 0 ? 0.0
                            : static_cast<double>(after.batches -
                                                  before.batches) /
-                                 static_cast<double>(records));
+                                 static_cast<double>(records),
+              sync ? " and fsync" : "");
   return handed;
 }
 
@@ -531,18 +531,27 @@ void bench_ambar(const Config& config) {
                      "each of these waits for the storage device");
   }
 
-  // -- synced writes from several threads: what group commit is worth --
+  // -- writes from several threads: what group commit is worth --
   //
   // One writer at a time is the design, and the queue behind the writer
   // merges everything waiting into one log write and one fsync.  Whether
   // that turns eight threads' worth of syncs into more than one thread's
   // rate is a measurement, and so is how many batches each fsync carries.
-  {
-    std::printf("\n  synced writes by threads, %d per thread\n",
-                std::max(1, config.keys / 400));
+  // Without sync there is no device flush to share, and the same phase
+  // says what the queue and the log append cost writers waiting on each
+  // other -- the design's own price, with nothing to hide behind.
+  //
+  // The synced phase is sized so that each row waits on the device a few
+  // seconds; the unsynced one is a hundred times faster and gets twenty
+  // times the writes, so that a row is still long enough for the cost of
+  // starting its threads to disappear into it.
+  for (const bool sync : {true, false}) {
+    const int per_thread = std::max(1, config.keys / (sync ? 400 : 20));
+    std::printf("\n  %s writes by threads, %d per thread\n",
+                sync ? "synced" : "unsynced", per_thread);
     for (int n = 1; n <= config.threads; n *= 2) {
-      sizes.handed_bytes += write_scaling_row(
-          db.get(), config, n, std::max(1, config.keys / 400), &rng);
+      sizes.handed_bytes +=
+          write_scaling_row(db.get(), config, n, per_thread, sync, &rng);
     }
   }
 

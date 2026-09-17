@@ -11,6 +11,7 @@ pass; it does not say they would notice a bug, and those are different claims.
     python3 tools/mutate.py mutations/powercut.json
     python3 tools/mutate.py mutations/faults.json
     python3 tools/mutate.py mutations/stats.json
+    python3 tools/mutate.py mutations/cache.json
 
 Each mutation is applied to the source, the project is rebuilt, the unit suite
 is run, and the script reports which tests noticed. The original file is

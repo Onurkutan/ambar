@@ -55,7 +55,12 @@ inline uint64_t fmix64(uint64_t h) {
   return h;
 }
 
-inline uint32_t bloom_hash(std::string_view key) {
+// The full 64-bit state, finalised.  bloom_hash below is its high half, and
+// the block cache keys its table by the whole of it -- a fixed-width key
+// that costs no allocation to compare, which the std::string it replaced
+// did on every lookup.  Two block keys hashing to the same 64 bits is a
+// collision the cache handles by comparing the bytes, not one it ignores.
+inline uint64_t hash64(std::string_view key) {
   constexpr uint64_t kPrime = 0x9e3779b97f4a7c15ull;
   const char* data = key.data();
   size_t remaining = key.size();
@@ -79,10 +84,13 @@ inline uint32_t bloom_hash(std::string_view key) {
   }
   h ^= tail;
   h *= kPrime;
+  return fmix64(h);
+}
 
+inline uint32_t bloom_hash(std::string_view key) {
   // The high half, because the low bits of a multiplicative hash are the
   // weakest and the probe positions are taken modulo the array length.
-  return static_cast<uint32_t>(fmix64(h) >> 32);
+  return static_cast<uint32_t>(hash64(key) >> 32);
 }
 
 }  // namespace ambar
