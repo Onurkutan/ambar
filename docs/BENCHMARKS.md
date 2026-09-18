@@ -413,6 +413,175 @@ the eight-thread row at 260,000 and 261,000, and the single-thread row,
 which moves most with the machine's load, at 179,000 and 216,000. The
 tables are medians.
 
+## Compression
+
+`Options::compression` is off by default, and every figure above is with it
+off. This is the same benchmark with it on — the same million keys, the
+same 100-byte values, half random and half repeated so that compression is
+neither pointless nor free — on the Windows machine of the sections above,
+each table the median of three runs, and a run of the coder table the
+best of five passes. Two things were measured: the coder on its own,
+against the coders it stands in for, and then the engine with the coder
+in it.
+
+### The coder
+
+`src/compress.hpp` is an LZ77 coder in the shape of LZ4, written here
+rather than taken from a library because its decoder is a parser of
+untrusted bytes. `ambar_codec_bench` runs it over the data blocks of an
+existing database — the first 65.0 MB of the uncompressed benchmark
+database's blocks, 16,220 of them, exactly what the builder hands the
+coder, restart arrays and internal-key trailers included — and
+`tools/compare_codecs.py` runs zlib and LZ4 over the same blocks, dumped
+to a file, so that the engine takes no dependency for the comparison's
+sake:
+
+| coder | ratio | compress | decompress |
+|---|---|---|---|
+| `src/compress.hpp`, as first written | 2.92× | 325 MB/s | 420 MB/s |
+| `src/compress.hpp`, now | 2.92× | 389 MB/s | **1,620 MB/s** |
+| LZ4 1.9.4, default | 2.93× | 516 MB/s | 2,485 MB/s |
+| LZ4 1.9.4, high compression | 3.54× | 58 MB/s | 2,559 MB/s |
+| zlib, level 1 | 4.09× | 90 MB/s | 255 MB/s |
+| zlib, level 6 | 4.63× | 48 MB/s | 299 MB/s |
+
+The ratio is LZ4's to the second decimal, and that is no coincidence: LZ4's
+default level is the same idea — a hash of each four-byte window, the
+first candidate taken, greedily — and the details that differ, how far a
+match is extended backwards over the literals before it and how positions
+are skipped when nothing matches, come out even on this data. zlib finds
+more matches and then entropy-codes what is left, at a fifth to a tenth of
+the speed in, and LZ4's high-compression level tries more candidates for
+each; both are a better ratio bought with compression time, and neither
+is what the engine needs on a write path that is bound by `fsync` and
+compaction.
+
+The gap was speed, and where it was is the finding. As first written the
+decoder ran at a sixth of LZ4's rate, because it appended every byte of a
+match one at a time: a match may overlap what it copies — an offset of one
+repeats the last byte — and the byte loop was the safe way to copy one,
+with a capacity check on every `push_back`. It now writes into a string
+sized once for the declared length, and copies eight bytes at a time when
+there is a step of room to spill into past the literals in the input and
+past where they land in the output, and when the match's source is at least
+a step behind its destination, so that no step reads what the step before
+it has not yet written; where there is not, it copies exactly, one memcpy
+for a match that does not overlap and one byte at a time for one that
+does. Every bounds check the decoder had it still has, one per sequence
+rather than one per byte, and `mutations/compress.json` removes each in
+turn, the room checks on the wide copies included. That took decoding from
+420 to 1,620 MB/s, two thirds of LZ4's rate; the rest of the gap is
+years of work on exactly this loop, wider steps and fewer branches, which
+this project is not going to reproduce. Compression went from 325 to 389
+MB/s, three quarters of LZ4's, from sizing the hash table to the block
+instead of zeroing 64 KiB of table for every 4 KiB block, and from writing
+the output through a pointer rather than a `push_back` per byte.
+
+The LZ4 and zlib rates are those of the C libraries behind Python's
+bindings, net of the cost of calling into them from Python, which
+`tools/compare_codecs.py` measures on a sixteen-byte block — all call and
+no work — and subtracts once per block: 0.2 µs for an LZ4 decode, which
+at 2.5 GB/s on a four-kilobyte block is an eighth of the decode itself,
+and 0.4 µs for a compress. As timed, before the subtraction, LZ4 decoded
+at 2,195 MB/s. The subtraction takes with it whatever the library does
+per call in C, so it flatters the library a little, which is the right
+direction for a comparison this coder is on the other side of. zlib's
+compress call costs 4 µs on the sixteen-byte block, and that is zlib
+setting up, so its net figure is flattered by a tenth.
+
+### The engine
+
+The same benchmark, compression off and on, before and after the decoder
+above was made fast. Space and write amplification are what compression
+is for; the read rows are what it costs, or was expected to.
+
+The off column is a fresh run of the same benchmark; it differs from the
+sections above where compaction's timing does — 5.24 here against 5.41
+under *Write amplification* — and agrees where it does not, the log to
+within a megabyte and the directory to the byte.
+
+| | off | on, decoder as first written | on, now |
+|---|---|---|---|
+| on disk, after compaction | 110.8 MB | 39.9 MB | 39.9 MB |
+| space amplification | 1.02 | **0.37** | **0.37** |
+| write amplification | 5.24 (1,600.8 MB) | 2.53 (771.4 MB) | **2.59** (791.5 MB) |
+| — of which flush / compaction | 312.1 / 932.1 MB | 112.9 / 301.9 MB | 113.0 / 321.9 MB |
+| write sequential, no sync | 163,600 op/s | 159,100 op/s | 165,800 op/s |
+| write random, no sync | 72,400 op/s (p99.9 104 µs) | 79,300 op/s (p99.9 104 µs) | **89,500 op/s** (p99.9 96 µs) |
+| read random, present, 8 MB cache | 64,300 op/s (p50 14.8 µs) | 48,400 op/s (p50 19.8 µs) | **77,100 op/s** (p50 12.0 µs) |
+| — bytes read from disk per lookup | 3.8 KB | 1.3 KB | 1.3 KB |
+| read random, absent | 762,900 op/s | 714,800 op/s | 747,800 op/s |
+| scan, cold blocks | 2,155,000 op/s | 1,633,000 op/s | **2,462,000 op/s** |
+| — bytes read from disk per byte scanned | 0.99 | 0.34 | 0.34 |
+
+By block cache size, random reads of present keys on a freshly opened
+database, as in the read tables above (a separate phase from the read row
+in the table above, which runs on the database as the writes left it);
+the cache holds decoded blocks, so
+its sizes are the same fraction of the data in both modes and a given size
+misses at the same rate in both — 0.93 reads per lookup at 8 MB, 0.14 at
+256 MB — and what differs is what a miss costs:
+
+| block cache | off | on, decoder as first written | on, now |
+|---|---|---|---|
+| 1 MB (1 % of the data) | 64,700 read/s | 47,300 | 77,300 |
+| 8 MB (7 %) — the default | 65,500 | 48,200 | 76,200 |
+| 64 MB (58 %) | 104,800 | 85,300 | 116,400 |
+| 256 MB (231 %) | 195,800 | 168,900 | 220,000 |
+| eight threads, 8 MB cache | 323,900 | 214,300 | 326,700 |
+| eight threads, everything resident | 1,446,000 | 1,421,000 | 1,508,000 |
+
+The space and write columns are the ones a reader wants first. On these
+values the database on disk is 36 % of what it was, and write
+amplification halves: the log is the same 356.6 MB in both modes, since it
+is written before any block is built, but flush and compaction write a
+third of the bytes, because it is compressed blocks that get flushed and
+then compacted, and compaction moves what it reads. The random-write row
+follows from that: with a third of the compaction I/O in its way it is
+24 % faster and its tail is lower, and the sequential row does not move,
+because it never waited on compaction to begin with.
+
+The read rows were expected to be the cost, and with the decoder as first
+written they were: a lookup that missed the cache read a 1.3 KB block and
+then turned it into 3.8 KB, nine microseconds of decoding at that
+decoder's rate, and the p50 rose by five. With the decoder as it is now,
+compression on reads *faster* than compression off at every cache size,
+and the cold scan is 14 % faster.
+Two things this benchmark cannot separate are behind that, and both are
+consequences of compression rather than accidents. A miss moves 1.3 KB
+through the file API instead of 3.8, and on a database that sits in the
+operating system's page cache that copy is a large part of what a miss
+costs, so the 2.4 µs of decoding at 1.6 GB/s is paid for out of the bytes
+it replaces. And the tree is shallower: the levels are sized in bytes on
+disk, ten megabytes at level 1 and ten times that at each level below, so
+39.9 MB of tables settles at level 2 in 20 files where 110.8 MB settled
+at level 3 in 57 or so, and a lookup that reaches the bottom searches one
+index and one filter fewer on its way. The absent-key row, which reads no
+block at all, does not separate the three columns — eight of the nine
+runs lie between 700,000 and 770,000, and the ninth, an off run, at
+584,000 — which says the filter is neither helped nor hurt.
+
+With everything resident nothing is decoded, and the resident columns
+agree to within their spread. What compression costs, then, is a decode
+per cache miss; what it saves is the bytes of every miss, of every flush
+and compaction, and of the directory; and on this machine, with this data
+and the page cache warm, the decode is cheaper than the bytes it replaces.
+On real storage, where a miss is a device read rather than a page-cache
+copy, the bytes saved would be worth more still and the decode the same.
+
+The tables are medians of three runs. The read-present row moved by 2 %
+across the three off runs, 4 % on, and 5 % now; the scan by 2 %, 3 % and
+4 %; the write-random row by 9 %, 4 % and 7 %; compaction's bytes by 2 %,
+7 % and 9 %, which is the scheduler deciding when compactions overlap the
+writes. The coder's decoding rate is the figure that moves most with the
+machine's state: 1,606 to 1,653 MB/s across the three runs behind the
+table, and 1,512 to 1,545 an hour later on the same binary and blocks.
+Reproduce with:
+
+    ./build/ambar_bench /tmp/bench --keys 1000000 --value-size 100 --compression lz
+    ./build/ambar_codec_bench /tmp/bench/ambar --dump blocks.bin
+    python3 tools/compare_codecs.py blocks.bin      # pip install lz4, optionally
+
 ## What is not measured
 
 **Anything under memory pressure or with a cold page cache.** Every number here

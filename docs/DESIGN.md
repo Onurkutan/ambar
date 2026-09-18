@@ -537,10 +537,17 @@ bytes and every such parser in this project is its own, fuzzed
 (`fuzz/fuzz_compress.cpp`), and bounded at every read; `tests/test_compress.cpp`
 overruns each of the decoder's checks by hand and `mutations/compress.json`
 removes each in turn. The encoder is the cheapest matcher there is — a hash
-of each four-byte window, the first match taken. LZ4's default level is the
-same idea with years of tuning behind it, and its high-compression levels and
-zstd search harder and compress smaller; `docs/BENCHMARKS.md` will put the
-numbers side by side rather than pretend otherwise.
+of each four-byte window, the first match taken — and so is LZ4's default
+level: on the benchmark's own blocks the two reach the same ratio, 2.92× to
+2.93×, and the coders that search harder, LZ4's high level and zlib, reach
+3.5× and 4.6× at a tenth of the speed in. The decoder was where this coder
+fell short, at a sixth of LZ4's rate, and the reason was the copy: every
+byte of a match appended one at a time, because a match may overlap what it
+copies. It now copies a sequence at a time, eight bytes at a step where it
+has shown there is room for the step to spill and one at a time where there
+is not, with every check it had, and decodes at two thirds of LZ4's
+rate. `docs/BENCHMARKS.md` puts the coders side by side and then measures
+the engine with compression on.
 
 The choice is recorded per block, not per file. The builder stores a block
 compressed only when that is smaller, and writes the trailer's type byte to
@@ -821,6 +828,9 @@ which file it sits in.
   table reads it made, against the simulated disk's counts of what was
   appended and what was served. See *Compaction* and *The read path* above
   for why the counts are the engine's to keep.
+* `tools/codec_bench` with `tools/compare_codecs.py` — the block coder over
+  the data blocks of an existing database, ratio and rate, and zlib and LZ4
+  over the same blocks for comparison. See *Compression* above.
 * `tools/bench` — throughput and latency for sequential and random workloads,
   with and without `sync`, reported as percentiles because an average hides
   what compaction does to the tail. It reports three amplifications and
@@ -855,11 +865,12 @@ to discover.
 
 * **A better compressor.** The coder in `src/compress.hpp` takes the first
   match its hash table offers and stops there; LZ4's high-compression
-  levels search further back and zstd adds an entropy model, and both
-  compress the same data smaller. The block cache holds decoded blocks, so
-  a better coder would change what a decode costs and nothing after it.
-  Not done because the point of writing the coder was to own the decoder,
-  not to win on ratio.
+  level tries more candidates for each match and zlib adds an entropy
+  coder, and on the benchmark's blocks they compress a fifth and a third
+  smaller. The block
+  cache holds decoded blocks, so a better coder would change what a decode
+  costs and nothing after it. Not done because the point of writing the
+  coder was to own the decoder, not to win on ratio.
 * **Parallel compaction.** One background thread. Compaction is IO bound and
   its inputs and outputs are ordered with respect to each other, so a second
   thread would mostly contend for the same lock; doing it properly needs

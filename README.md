@@ -214,6 +214,24 @@ since a writer answered while it watched returns without the mutex, a
 leader that touched one afterwards would read a dead stack frame, which
 the AddressSanitizer job now runs with the detection to catch.
 
+**A decoder at a sixth of LZ4's speed, and a cost that turned into a
+gain.** The block coder was written here so that its decoder, a parser of
+untrusted bytes, would be bounded and fuzzed like every other; measured
+against LZ4 on the engine's own blocks it reached the same ratio, 2.92×
+to 2.93×, and decoded at a sixth of the rate, because it appended every
+byte of a match one at a time — the safe way to copy a match that may
+overlap what it copies. With compression on, a lookup that missed the
+cache spent nine microseconds decoding and the median rose by five. The
+decoder now copies eight bytes at a step where it has shown there is room
+for the step to spill and one at a time where there is not, with every
+check it had, and runs at two thirds of LZ4's rate; and with that,
+compression on reads *faster* than compression off at every cache size,
+because a miss moves a third of the bytes and the tree it searches is a
+level shallower, while the database on disk is 36 % of its size and write
+amplification halves. `mutations/compress.json` removes each of the
+decoder's room checks in turn, and the two whose removal changes no byte
+of any result are the ones only the sanitizer job sees.
+
 **And several claims that were simply wrong.** The design document said, as
 such documents usually do, that the log record must precede the memtable insert
 or a value becomes readable before it is durable. Swapping the two and running
@@ -239,7 +257,7 @@ engine, and the comment says what still is not.
     cmake --build build
     ./build/ambar_tests
 
-241 tests, no external framework. Also:
+242 tests, no external framework. Also:
 
     cmake -S . -B build-asan -DAMBAR_SANITIZE=address   # ASan + UBSan
     cmake -S . -B build-tsan -DAMBAR_SANITIZE=thread    # ThreadSanitizer
@@ -320,8 +338,10 @@ scaling: random reads on one to eight threads, with the database on disk
 and with it held entirely in memory, where the engine's own locks are all
 that is left to measure; and synced writes on one to eight threads, beside
 the number of batches each `fsync` carried, which is what group commit is
-for. See `docs/BENCHMARKS.md` for the numbers and what they do and do not
-show.
+for. The same run with `--compression lz` is what compression costs and
+saves, and `ambar_codec_bench` with `tools/compare_codecs.py` puts the
+block coder beside zlib and LZ4 on the same blocks. See `docs/BENCHMARKS.md`
+for the numbers and what they do and do not show.
 
 ## Documentation
 
@@ -335,7 +355,8 @@ show.
 
 Stated so that the absence is a decision rather than something a reader has to
 discover: one compaction thread, no column families or transactions, and a
-compressor that is not LZ4's equal. `docs/DESIGN.md` says why for each.
+compressor with LZ4's ratio at two thirds of its decoding speed.
+`docs/DESIGN.md` says why for each.
 Repair rebuilds a database but not the history behind it: a key deleted
 before the damage can come back if a stale pre-compaction file survived, and
 `docs/DESIGN.md` says exactly when.

@@ -276,3 +276,34 @@ TEST(compress, refuses_a_declared_size_the_bytes_could_not_deliver) {
   CHECK_OK(decompress_block(compressed, &out));
   CHECK_EQ(out.size(), size_t{100000});
 }
+
+TEST(compress, a_wide_copy_stays_inside_the_declared_size) {
+  // The decoder copies eight bytes at a time when there is a step to spill
+  // into past the literals in the input and past where they land in the
+  // output, and one at a time otherwise.  A stream an encoder wrote never
+  // has the first without the second, so the output's guard is reached
+  // only by a hostile stream: literals that end within a step of the
+  // declared size, with bytes to spare after them -- garbage, which the
+  // decoder refuses when it reaches it.  Without the guard a wide copy
+  // would already have written past the declared size, into whatever lies
+  // beyond the string; a sanitizer sees that, and this build sees the
+  // terminator the spill overwrites.  4095 leaves the string's storage no
+  // slack for a spill to hide in, and the garbage is not zero.
+  const size_t declared = 4095;
+  std::string body;
+  body += std::string("\x10", 1) + "a";              // one literal, and a
+  body += std::string("\x01\x00", 2);                 // match of four from
+                                                    // one behind: "aaaaa"
+  body += std::string("\xf0", 1);                    // 15 literals and more:
+  body += std::string(15, static_cast<char>(255));  // 4090 - 15 = 4075
+  body += std::string("\xfa", 1);                    // = 15 * 255 + 250
+  body += std::string(4090, 'b');                   // which end at 4095
+  body += std::string(8, static_cast<char>(255));   // then an offset of 65535
+  std::string out;
+  const Status status = decompress_block(stream(declared, body), &out);
+  CHECK(status.is_corruption());
+  CHECK(status.to_string().find("match reaches before the start") !=
+        std::string::npos);
+  CHECK_EQ(out.size(), declared);
+  CHECK_EQ(out.c_str()[out.size()], '\0');
+}

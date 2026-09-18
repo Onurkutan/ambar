@@ -5,7 +5,6 @@
 #include <cassert>
 #include <cstdint>
 #include <cstring>
-#include <vector>
 
 #include "encoding.hpp"
 
@@ -15,26 +14,43 @@ namespace {
 
 constexpr size_t kMinMatch = 4;
 constexpr size_t kMaxOffset = 65535;  // two bytes
-constexpr size_t kHashBits = 14;      // 16 K entries, 64 KiB of positions
-constexpr size_t kHashSize = size_t{1} << kHashBits;
+
+// The hash table is sized to the input, a slot per position between these
+// bounds, because it is zeroed for every block: 64 KiB of positions for a
+// 4 KiB block cost more to clear than the block cost to match, and were
+// measured to -- tools/codec_bench, before and after.  The largest table
+// is 16 K entries, 64 KiB, on the stack.
+constexpr int kMinHashBits = 8;
+constexpr int kMaxHashBits = 14;
+
+int hash_bits_for(size_t n) {
+  int bits = kMinHashBits;
+  while (bits < kMaxHashBits && (size_t{1} << bits) < n) ++bits;
+  return bits;
+}
 
 // Four bytes to a table slot.  The multiply spreads the high bits of the
 // word over the whole table; the shift keeps the ones that spread best.
-inline uint32_t hash4(const char* p) {
+inline uint32_t hash4(const char* p, int bits) {
   uint32_t word;
   std::memcpy(&word, p, 4);
-  return (word * 2654435761u) >> (32 - kHashBits);
+  return (word * 2654435761u) >> (32 - bits);
 }
+
+// The encoder writes through a pointer into a string sized for the worst
+// case up front, and cuts the string to what it wrote at the end: a
+// push_back per byte was a capacity check per byte, and measurable.
 
 // Writes a length in the LZ4 style: a nibble already placed in the token
 // holds up to 14, fifteen means "and more follows", and the rest is bytes
 // of 255 ending in a byte below 255.
-void put_length(std::string* out, size_t length) {
+inline char* put_length(char* out, size_t length) {
   while (length >= 255) {
-    out->push_back(static_cast<char>(255));
+    *out++ = static_cast<char>(255);
     length -= 255;
   }
-  out->push_back(static_cast<char>(length));
+  *out++ = static_cast<char>(length);
+  return out;
 }
 
 // The nibble for a token, and whether a continuation follows.
@@ -42,21 +58,44 @@ inline uint8_t nibble_of(size_t length) {
   return length >= 15 ? 15 : static_cast<uint8_t>(length);
 }
 
-void emit_sequence(std::string* out, const char* literals, size_t literal_count,
-                   size_t match_length, size_t offset) {
+// Copies n bytes eight at a time, and so writes up to seven bytes past
+// to + n and reads up to seven past from + n -- a whole step when n is
+// zero, since it always takes one: the caller has shown there is a step
+// of room for both, and what spills is overwritten by the sequence that
+// follows.  `from` must be at least kWildCopyStep behind `to`, or a step
+// would read bytes the step before it had not written yet.  This is what
+// LZ4's speed is made of: a copy of a few bytes costs a call and a
+// length dispatch as memcpy, and one instruction as this.  A do-while,
+// because most copies are one step and the test on the way in cost a
+// quarter of the decoder's rate when it was a while.
+constexpr size_t kWildCopyStep = 8;
+
+inline void wild_copy(char* to, const char* from, size_t n) {
+  char* const stop = to + n;
+  do {
+    std::memcpy(to, from, kWildCopyStep);
+    to += kWildCopyStep;
+    from += kWildCopyStep;
+  } while (to < stop);
+}
+
+char* emit_sequence(char* out, const char* literals, size_t literal_count,
+                    size_t match_length, size_t offset) {
   // match_length is the full length, at least kMinMatch when a match is
   // present, and zero for the trailing literal-only sequence.
   const size_t match_code = match_length == 0 ? 0 : match_length - kMinMatch;
   const uint8_t token =
       static_cast<uint8_t>((nibble_of(literal_count) << 4) |
                            (match_length == 0 ? 0 : nibble_of(match_code)));
-  out->push_back(static_cast<char>(token));
-  if (literal_count >= 15) put_length(out, literal_count - 15);
-  out->append(literals, literal_count);
-  if (match_length == 0) return;
-  out->push_back(static_cast<char>(offset & 0xff));
-  out->push_back(static_cast<char>((offset >> 8) & 0xff));
-  if (match_code >= 15) put_length(out, match_code - 15);
+  *out++ = static_cast<char>(token);
+  if (literal_count >= 15) out = put_length(out, literal_count - 15);
+  std::memcpy(out, literals, literal_count);
+  out += literal_count;
+  if (match_length == 0) return out;
+  *out++ = static_cast<char>(offset & 0xff);
+  *out++ = static_cast<char>((offset >> 8) & 0xff);
+  if (match_code >= 15) out = put_length(out, match_code - 15);
+  return out;
 }
 
 }  // namespace
@@ -74,15 +113,22 @@ void compress_block(std::string_view input, std::string* output) {
   // four gigabytes has the wrong function.
   assert(n <= UINT32_MAX);
   put_varint32(output, static_cast<uint32_t>(n));
+  // Room for the worst case, then a pointer; cut to size at the end.
+  const size_t start = output->size();
+  output->resize(start + max_compressed_size(n));
+  char* out = output->data() + start;
   if (n == 0) {
     // One empty literal run, so the decoder sees a well-formed stream and
     // not a bare length.
-    output->push_back(0);
+    *out++ = 0;
+    output->resize(static_cast<size_t>(out - output->data()));
     return;
   }
 
   const char* const base = input.data();
-  std::vector<uint32_t> table(kHashSize, 0);  // position + 1; zero is empty
+  const int bits = hash_bits_for(n);
+  uint32_t table[size_t{1} << kMaxHashBits];  // position + 1; zero is empty
+  std::memset(table, 0, sizeof(uint32_t) << bits);
 
   size_t literal_start = 0;  // first byte not yet emitted
   size_t pos = 0;
@@ -92,7 +138,7 @@ void compress_block(std::string_view input, std::string* output) {
   const size_t last_hashable = n >= kMinMatch ? n - kMinMatch + 1 : 0;
 
   while (pos < last_hashable) {
-    const uint32_t h = hash4(base + pos);
+    const uint32_t h = hash4(base + pos, bits);
     const uint32_t candidate = table[h];
     table[h] = static_cast<uint32_t>(pos + 1);
 
@@ -108,14 +154,21 @@ void compress_block(std::string_view input, std::string* output) {
       continue;
     }
 
-    // Extend the match as far as it goes.
+    // Extend the match as far as it goes: eight bytes at a time while
+    // eight remain and agree, then one at a time to the first that does
+    // not.  A byte-order-free way to compare a word, and the compilers
+    // this builds under turn a memcmp of eight into one.
     size_t length = kMinMatch;
+    while (pos + length + 8 <= n &&
+           std::memcmp(base + match_pos + length, base + pos + length, 8) == 0) {
+      length += 8;
+    }
     while (pos + length < n && base[match_pos + length] == base[pos + length]) {
       ++length;
     }
 
-    emit_sequence(output, base + literal_start, pos - literal_start, length,
-                  offset);
+    out = emit_sequence(out, base + literal_start, pos - literal_start,
+                        length, offset);
     pos += length;
     literal_start = pos;
 
@@ -123,14 +176,15 @@ void compress_block(std::string_view input, std::string* output) {
     // the new position keeps the table warm across a match without the
     // cost of hashing every skipped byte.
     if (pos >= 1 && pos - 1 < last_hashable) {
-      table[hash4(base + pos - 1)] = static_cast<uint32_t>(pos);
+      table[hash4(base + pos - 1, bits)] = static_cast<uint32_t>(pos);
     }
   }
 
   // Whatever is left is literals, always: a stream ends in a literal-only
   // sequence, even an empty one, so the decoder finds a token where it
   // expects one.
-  emit_sequence(output, base + literal_start, n - literal_start, 0, 0);
+  out = emit_sequence(out, base + literal_start, n - literal_start, 0, 0);
+  output->resize(static_cast<size_t>(out - output->data()));
 }
 
 Status decompress_block(std::string_view input, std::string* output) {
@@ -152,7 +206,14 @@ Status decompress_block(std::string_view input, std::string* output) {
     return Status::corruption(
         "compressed block declares more than its bytes could deliver");
   }
-  output->reserve(total);
+  // Sized once, written in place.  Every write below is bounded by what
+  // the declared size has room for, checked before the copy, so there is
+  // no per-byte check to pay and nothing to grow; `produced` is how far
+  // the writing has got.  On a refusal the string holds whatever was
+  // written before it, which no caller reads.
+  output->resize(total);
+  char* const out = output->data();
+  size_t produced = 0;
 
   const char* p = input.data();
   const char* const end = p + input.size();
@@ -179,7 +240,7 @@ Status decompress_block(std::string_view input, std::string* output) {
 
     // Literals.
     size_t literal_count = token >> 4;
-    const size_t room = total - output->size();
+    const size_t room = total - produced;
     if (literal_count == 15 && !read_extra(&literal_count, room)) {
       return Status::corruption("literal length overruns the block");
     }
@@ -189,13 +250,22 @@ Status decompress_block(std::string_view input, std::string* output) {
     if (static_cast<size_t>(end - p) < literal_count) {
       return Status::corruption("literals overrun the compressed input");
     }
-    output->append(p, literal_count);
+    // Eight at a time when the input has a step to spare past the
+    // literals and the output a step to spare past where they land;
+    // exactly, otherwise, which is how every stream's last run goes.
+    if (static_cast<size_t>(end - p) >= literal_count + kWildCopyStep &&
+        room >= literal_count + kWildCopyStep) {
+      wild_copy(out + produced, p, literal_count);
+    } else {
+      std::memcpy(out + produced, p, literal_count);
+    }
+    produced += literal_count;
     p += literal_count;
 
     if (p == end) {
       // The final, literal-only sequence.  Everything declared must be
       // here, and nothing more.
-      if (output->size() != total) {
+      if (produced != total) {
         return Status::corruption(
             "compressed block delivers less than it declares");
       }
@@ -210,12 +280,12 @@ Status decompress_block(std::string_view input, std::string* output) {
         static_cast<uint8_t>(p[0]) |
         (static_cast<size_t>(static_cast<uint8_t>(p[1])) << 8);
     p += 2;
-    if (offset == 0 || offset > output->size()) {
+    if (offset == 0 || offset > produced) {
       return Status::corruption("match reaches before the start of the block");
     }
 
     size_t match_length = (token & 0xf) + kMinMatch;
-    const size_t match_room = total - output->size();
+    const size_t match_room = total - produced;
     if ((token & 0xf) == 15 && !read_extra(&match_length, match_room)) {
       return Status::corruption("match length overruns the block");
     }
@@ -223,14 +293,24 @@ Status decompress_block(std::string_view input, std::string* output) {
       return Status::corruption("match overruns the declared size");
     }
 
-    // Byte by byte, because the source may overlap the destination: an
-    // offset of one repeats the last byte.  Appending invalidates nothing
-    // here since the capacity was reserved for the whole declared size,
-    // but the index is what is kept, not a pointer, all the same.
-    const size_t from = output->size() - offset;
-    for (size_t i = 0; i < match_length; ++i) {
-      output->push_back((*output)[from + i]);
+    // The source is behind the destination by `offset`.  With a step or
+    // more between them and a step of room past the match, eight at a
+    // time; with less between them the match repeats what it is
+    // producing -- an offset of one repeats the last byte -- and goes
+    // byte by byte, since a wider copy would read bytes it had not yet
+    // written.  Nearly every match in data with structure takes the
+    // first path, and the decoder's whole cost was the third when every
+    // match took it.
+    const char* const from = out + produced - offset;
+    char* const to = out + produced;
+    if (offset >= kWildCopyStep && match_room >= match_length + kWildCopyStep) {
+      wild_copy(to, from, match_length);
+    } else if (offset >= match_length) {
+      std::memcpy(to, from, match_length);
+    } else {
+      for (size_t i = 0; i < match_length; ++i) to[i] = from[i];
     }
+    produced += match_length;
   }
 }
 

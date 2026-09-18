@@ -13,19 +13,23 @@
 // far, and the match copies that many bytes forward from there.  The last
 // sequence carries literals and no match.  A match may overlap what it
 // copies -- an offset of one with a length of forty is forty copies of one
-// byte -- which is how a run is encoded, and why the copy below goes byte
-// by byte rather than through memcpy.
+// byte -- which is how a run is encoded.
 //
 // The encoder hashes each four-byte window into a table of positions and
 // takes the first match of at least four bytes it finds there, greedily.
-// That is the cheapest LZ there is and it shows in the ratio: LZ4 with its
-// tuned matcher does better, and when the engine writes compressed blocks
-// docs/BENCHMARKS.md will say by how much rather than pretending
-// otherwise.  The decoder is the part that has to
-// be right, and it is bounded at every step: a length that would run past
-// the declared size, an offset that reaches before the start, a stream
-// that ends inside a sequence -- each is a corruption, reported, never
-// read.
+// That is the cheapest LZ there is, and it is also LZ4's default level:
+// on the engine's own blocks the two reach the same ratio, 2.92x against
+// 2.93x, and the coders that search harder -- LZ4's high level, zlib --
+// reach a fifth to a half more at a tenth of the speed in.  This one
+// compresses at three quarters of LZ4's rate and decodes at two thirds
+// of it; docs/BENCHMARKS.md has the tables, and what the engine gains and
+// pays with it on.  The decoder is the part that has to be right, and it
+// is bounded at every step: a length that would run past the declared
+// size, an offset that reaches before the start, a stream that ends
+// inside a sequence -- each is a corruption, reported, never read.  Its
+// speed is the copies: a sequence at a time, eight bytes at a step where
+// it has shown there is room for the step to spill, one at a time where
+// there is not, and the checks come before the copy either way.
 #ifndef AMBAR_COMPRESS_HPP_
 #define AMBAR_COMPRESS_HPP_
 
@@ -43,16 +47,17 @@ namespace ambar {
 // is asserted rather than checked: a block is never near it.
 void compress_block(std::string_view input, std::string* output);
 
-// The most compress_block can produce for an input of `n` bytes, so a
-// caller can reserve once.
+// The most compress_block can produce for an input of `n` bytes, which
+// is what it sizes its output to before it writes.
 size_t max_compressed_size(size_t n);
 
 // Decodes what compress_block produced into *output, replacing its
 // contents.  Any input at all may be handed in; a malformed one is refused
-// with kCorruption and *output is left in an unspecified state.  The
-// decoded length is what the stream declared, checked as it is produced,
-// so a stream that claims more than it delivers, or delivers more than it
-// claims, is refused too.
+// with kCorruption, and *output is then sized to the length the stream
+// declared and holds whatever was decoded before the refusal, which no
+// caller should read.  The decoded length is what the stream declared,
+// checked as it is produced, so a stream that claims more than it
+// delivers, or delivers more than it claims, is refused too.
 Status decompress_block(std::string_view input, std::string* output);
 
 }  // namespace ambar

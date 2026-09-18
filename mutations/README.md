@@ -89,6 +89,19 @@ scheduler. On this machine they always are, by hundreds. A survival on a
 machine where no group formed says nothing about the count, and the test
 prints how many groups it saw so the two cases can be told apart.
 
+**`compress.json`, the two marked `(sanitizer)`: a wide copy reading past
+the end of the input, and a match spilling past the end of the output.**
+The decoder copies eight bytes at a time where it has shown there is a step
+of room to spill into, and one at a time where there is not. Remove the
+input check and the spill is read from past the compressed block; remove
+the match's output check and it is written past the declared size. Neither
+changes a byte of the result -- what spills is overwritten by the next
+sequence, or the stream is refused -- so no assertion sees them, and on a
+plain build both survive. A build configured with `AMBAR_SANITIZE=address`
+in `build/` catches both, as a report from the copy itself. The third room
+check, on literals spilling past the output, has a test of its own: the
+spill overwrites the string's terminator, which the test reads back.
+
 ## The other direction: failure injection
 
 `tools/mutate.py` breaks the code. `tests/test_faults.cpp` breaks the *disk*

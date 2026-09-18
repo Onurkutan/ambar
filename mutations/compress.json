@@ -1,5 +1,5 @@
 {
-  "_comment": "The block decoder's bounds checks, removed one at a time. tests/test_compress.cpp hands the decoder streams built by hand to overrun each one -- a length past the declared size, a token claiming more literals than the input holds, an offset before the start, a stream cut off inside a sequence -- and requires not just a corruption status but the one that check produces, since a check that is gone can leave a later check to refuse the stream after the out-of-bounds read has already happened. The encoder is covered by the round trips. Not here: the in-loop room check in read_extra, which only stops a run of 255s early; with it gone the post-check refuses the same streams with a different message, so a mutant is equivalent for the decoder's answer and the check is defence in depth.",
+  "_comment": "The block decoder's bounds checks, removed one at a time. tests/test_compress.cpp hands the decoder streams built by hand to overrun each one -- a length past the declared size, a token claiming more literals than the input holds, an offset before the start, a stream cut off inside a sequence -- and requires not just a corruption status but the one that check produces, since a check that is gone can leave a later check to refuse the stream after the out-of-bounds read has already happened. The encoder is covered by the round trips. Not here: the in-loop room check in read_extra, which only stops a run of 255s early; with it gone the post-check refuses the same streams with a different message, so a mutant is equivalent for the decoder's answer and the check is defence in depth. The wide copies: a match copied eight bytes at a time from less than eight behind repeats bytes it has not written yet, and the round trips see it; literals copied wide with no room past them in the output overwrite the string's terminator, which the test built for it reads. The two room checks left -- a wide copy reading past the end of the input, and a match spilling past the end of the output -- change no byte of the result when removed, so they survive a plain build and are caught by a build with AMBAR_SANITIZE=address, which is what the (sanitizer) in their names means; see mutations/README.md.",
   "decoder: accept literals past the declared size": [
     "src/compress.cpp",
     "    if (literal_count > room) {\n      return Status::corruption(\"literals overrun the declared size\");\n    }",
@@ -12,13 +12,13 @@
   ],
   "decoder: accept an offset before the start": [
     "src/compress.cpp",
-    "    if (offset == 0 || offset > output->size()) {",
+    "    if (offset == 0 || offset > produced) {",
     "    if (offset == 0) {"
   ],
   "decoder: accept an offset of zero": [
     "src/compress.cpp",
-    "    if (offset == 0 || offset > output->size()) {",
-    "    if (offset > output->size()) {"
+    "    if (offset == 0 || offset > produced) {",
+    "    if (offset > produced) {"
   ],
   "decoder: accept a match past the declared size": [
     "src/compress.cpp",
@@ -27,22 +27,42 @@
   ],
   "decoder: accept a stream that delivers less than it declares": [
     "src/compress.cpp",
-    "      if (output->size() != total) {\n        return Status::corruption(\n            \"compressed block delivers less than it declares\");\n      }",
+    "      if (produced != total) {\n        return Status::corruption(\n            \"compressed block delivers less than it declares\");\n      }",
     "      ;"
   ],
   "encoder: miscount the extended literal length": [
     "src/compress.cpp",
-    "  if (literal_count >= 15) put_length(out, literal_count - 15);",
-    "  if (literal_count >= 15) put_length(out, literal_count - 14);"
+    "  if (literal_count >= 15) out = put_length(out, literal_count - 15);",
+    "  if (literal_count >= 15) out = put_length(out, literal_count - 14);"
   ],
   "encoder: write the offset with its bytes swapped": [
     "src/compress.cpp",
-    "  out->push_back(static_cast<char>(offset & 0xff));\n  out->push_back(static_cast<char>((offset >> 8) & 0xff));",
-    "  out->push_back(static_cast<char>((offset >> 8) & 0xff));\n  out->push_back(static_cast<char>(offset & 0xff));"
+    "  *out++ = static_cast<char>(offset & 0xff);\n  *out++ = static_cast<char>((offset >> 8) & 0xff);",
+    "  *out++ = static_cast<char>((offset >> 8) & 0xff);\n  *out++ = static_cast<char>(offset & 0xff);"
   ],
   "decoder: reserve whatever the stream declares": [
     "src/compress.cpp",
     "  if (total > 255 * input.size()) {\n    return Status::corruption(\n        \"compressed block declares more than its bytes could deliver\");\n  }",
     "  ;"
+  ],
+  "decoder: wild-copy a match from less than a step behind": [
+    "src/compress.cpp",
+    "    if (offset >= kWildCopyStep && match_room >= match_length + kWildCopyStep) {",
+    "    if (offset >= 1 && match_room >= match_length + kWildCopyStep) {"
+  ],
+  "decoder (sanitizer): wild-copy literals past the end of the input": [
+    "src/compress.cpp",
+    "    if (static_cast<size_t>(end - p) >= literal_count + kWildCopyStep &&\n        room >= literal_count + kWildCopyStep) {",
+    "    if (room >= literal_count + kWildCopyStep) {"
+  ],
+  "decoder: wild-copy literals past the end of the output": [
+    "src/compress.cpp",
+    "    if (static_cast<size_t>(end - p) >= literal_count + kWildCopyStep &&\n        room >= literal_count + kWildCopyStep) {",
+    "    if (static_cast<size_t>(end - p) >= literal_count + kWildCopyStep) {"
+  ],
+  "decoder (sanitizer): wild-copy a match past the end of the output": [
+    "src/compress.cpp",
+    "    if (offset >= kWildCopyStep && match_room >= match_length + kWildCopyStep) {",
+    "    if (offset >= kWildCopyStep) {"
   ]
 }
