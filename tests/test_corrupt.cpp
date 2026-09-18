@@ -45,10 +45,13 @@ namespace {
 using ambar_test::TempDir;
 
 // Builds a small, valid database and returns its directory.
-void build_database(const std::string& path) {
+void build_database(const std::string& path,
+                    Options::Compression compression =
+                        Options::Compression::kNone) {
   Options options;
   options.create_if_missing = true;
   options.write_buffer_size = 64 << 10;
+  options.compression = compression;
 
   std::unique_ptr<DB> db;
   if (!DB::open(options, path, &db).is_ok()) return;
@@ -105,14 +108,13 @@ bool survives_open(const std::string& path) {
   return true;
 }
 
-}  // namespace
-
-// Every byte of every file, corrupted one at a time in a sample, must produce
-// a status rather than a crash.
-TEST(corrupt, damaged_files_produce_errors_not_crashes) {
+// Every byte of every file, corrupted one at a time in a sample, must
+// produce a status rather than a crash.  Over a database built with the
+// given compression; returns how many damaged copies were tried.
+int damage_and_open(Options::Compression compression) {
   TempDir source;
   const std::string original_path = source.file("db");
-  build_database(original_path);
+  build_database(original_path, compression);
 
   const auto paths = files_in(original_path);
   CHECK(!paths.empty());
@@ -159,7 +161,28 @@ TEST(corrupt, damaged_files_produce_errors_not_crashes) {
       CHECK(survives_open(copy_path));
     }
   }
+  return trials;
+}
+
+}  // namespace
+
+TEST(corrupt, damaged_files_produce_errors_not_crashes) {
+  const int trials = damage_and_open(Options::Compression::kNone);
   std::printf("    %d damaged copies opened without crashing\n", trials);
+  CHECK(trials > 50);
+}
+
+// The same, over tables whose data blocks are compressed streams.  Random
+// damage never passes the checksum -- a flip, a truncation or a garbage
+// run changes the bytes the trailer covers -- so here the checksum stands
+// in front of the decoder, and what this shows is that a compressed
+// database under damage is refused or read, never crashed on, the same as
+// a raw one.  The forged case, where the checksum is recomputed over the
+// damage so that the decoder is reached, is tests/test_compressed_tables.cpp.
+TEST(corrupt, damaged_compressed_tables_produce_errors_not_crashes) {
+  const int trials = damage_and_open(Options::Compression::kLz);
+  std::printf("    %d damaged compressed copies opened without crashing\n",
+              trials);
   CHECK(trials > 50);
 }
 

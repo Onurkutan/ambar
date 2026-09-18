@@ -63,7 +63,11 @@ class TableBuilder {
   uint64_t file_size() const { return offset_; }
 
  private:
-  void write_block(BlockBuilder* block, BlockHandle* handle);
+  // Finishes `block` and writes it, compressed when `compressible` and the
+  // options ask for it and it pays -- a block that would not shrink is
+  // written as it is.  Data blocks are compressible; the index and
+  // metaindex are not, being read once and held.
+  void write_block(BlockBuilder* block, bool compressible, BlockHandle* handle);
   void write_raw_block(std::string_view contents, CompressionType type,
                        BlockHandle* handle);
 
@@ -79,6 +83,7 @@ class TableBuilder {
   std::unique_ptr<FilterBlockBuilder> filter_block_;
 
   std::string last_key_;
+  std::string compressed_;  // scratch for write_block, reused per block
   uint64_t num_entries_ = 0;
   bool closed_ = false;
 

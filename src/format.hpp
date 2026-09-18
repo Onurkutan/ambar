@@ -39,12 +39,14 @@
 
 namespace ambar {
 
-// Compression is not implemented yet, but the byte is written from the first
-// version.  Adding a field later means every existing file is the old format;
-// reserving one now means the reader can already refuse what it cannot handle.
+// The byte was written from the first version, when nothing compressed, so
+// that a reader could already refuse what it could not handle; from 0.2.0
+// a data block may carry kLz, the coder in compress.hpp.  Index, filter and
+// metaindex blocks are always kNone.  A value this build does not know is a
+// corruption, not a guess.
 enum class CompressionType : uint8_t {
   kNone = 0x0,
-  kSnappy = 0x1,  // reserved; a file using it is rejected, not misread
+  kLz = 0x1,
 };
 
 // The trailer appended to every block.
@@ -129,7 +131,11 @@ class RandomAccessFile;
 // with a valid magic number and a handle claiming a gigabyte gets a gigabyte
 // allocated, and only then does the read fail.  Bounding the handle by the
 // size of the file it came from makes that impossible rather than merely
-// capped.
+// capped -- for the bytes read.  A compressed block then declares its
+// decoded length, and that one is capped rather than impossible: the
+// decoder refuses a length above 255 times the bytes it was given, which
+// is the most its format can deliver, so a hostile block of n bytes can
+// ask for 255n and no more (see compress.hpp).
 Status read_block(RandomAccessFile* file, uint64_t file_size,
                   const BlockHandle& handle, BlockContents* result);
 

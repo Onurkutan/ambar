@@ -118,22 +118,37 @@ bool seed_write_batch(const std::filesystem::path& root) {
                      WriteBatchInternal::contents(batch));
 }
 
+// Two tables of the same entries, one with its data blocks compressed, so
+// that the fuzzer reaches the decoder through the table reader as well as
+// through its own target, with the block parser behind it.
 bool seed_table(const std::filesystem::path& root, const FilterPolicy* policy) {
-  const std::filesystem::path path = seed_dir(root, "table") / "table";
-  std::unique_ptr<WritableFile> file;
-  if (!WritableFile::open(path.string(), /*append=*/false, &file).is_ok()) {
-    return false;
-  }
+  uint64_t raw_size = 0;
+  for (const auto compression :
+       {Options::Compression::kNone, Options::Compression::kLz}) {
+    const bool compressed = compression == Options::Compression::kLz;
+    const std::filesystem::path path =
+        seed_dir(root, "table") / (compressed ? "compressed" : "table");
+    std::unique_ptr<WritableFile> file;
+    if (!WritableFile::open(path.string(), /*append=*/false, &file).is_ok()) {
+      return false;
+    }
 
-  Options options;
-  options.filter_policy = policy;
-  options.block_size = 512;  // several data blocks, so the index is real
-  TableBuilder builder(options, file.get(), internal_key_comparator());
-  for (int i = 0; i < 200; ++i) {
-    builder.add(internal(i), "value_" + std::to_string(i));
+    Options options;
+    options.filter_policy = policy;
+    options.block_size = 512;  // several data blocks, so the index is real
+    options.compression = compression;
+    TableBuilder builder(options, file.get(), internal_key_comparator());
+    for (int i = 0; i < 200; ++i) {
+      builder.add(internal(i), "value_" + std::to_string(i));
+    }
+    if (!builder.finish().is_ok()) return false;
+    if (!file->sync().is_ok() || !file->close().is_ok()) return false;
+    // A compressed seed that did not shrink would be the raw seed twice,
+    // and the decoder would never be reached through the table reader.
+    if (compressed && builder.file_size() >= raw_size) return false;
+    raw_size = builder.file_size();
   }
-  if (!builder.finish().is_ok()) return false;
-  return file->sync().is_ok() && file->close().is_ok();
+  return true;
 }
 
 bool seed_wal(const std::filesystem::path& root) {

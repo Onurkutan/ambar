@@ -3,7 +3,9 @@
 #include "format.hpp"
 
 #include <cstring>
+#include <string>
 
+#include "compress.hpp"
 #include "encoding.hpp"
 #include "file.hpp"
 
@@ -124,15 +126,37 @@ Status read_block(RandomAccessFile* file, uint64_t file_size,
       }
       return Status::ok();
 
-    case CompressionType::kSnappy:
-      // Reserved but not implemented.  Refusing is the whole point of having
-      // written the byte from the first version: a reader that ignored it
-      // would hand compressed bytes to the block parser and report corruption
-      // somewhere far from the cause.
-      return Status::not_supported(
-          "table uses a compression this build cannot read");
+    case CompressionType::kLz: {
+      // Decoded into memory of its own, whoever owns the bytes read; the
+      // checksum above has passed, so what is being decoded is what was
+      // written, and the decoder still refuses anything it cannot bound --
+      // a checksum says the bytes are the ones written, not that the
+      // writer was this engine.
+      std::string decoded;
+      status = decompress_block(std::string_view(data, static_cast<size_t>(n)),
+                                &decoded);
+      if (!status.is_ok()) {
+        return Status::corruption("compressed block at offset " +
+                                  std::to_string(handle.offset()) +
+                                  " does not decode: " + status.message());
+      }
+      char* owned = new char[decoded.size() > 0 ? decoded.size() : 1];
+      std::memcpy(owned, decoded.data(), decoded.size());
+      result->data = std::string_view(owned, decoded.size());
+      result->heap_allocated = true;
+      result->cachable = true;
+      return Status::ok();
+    }
   }
-  return Status::corruption("unknown compression type in block trailer");
+  // A value this build does not know.  Not corruption: the checksum that
+  // covers the byte has just passed, so this is what a later format wrote,
+  // and refusing it by name is the whole point of having written the byte
+  // from the first version -- a reader that ignored it would hand the bytes
+  // to the block parser and report corruption somewhere far from the cause.
+  return Status::not_supported(
+      "block at offset " + std::to_string(handle.offset()) +
+      " uses a compression this build cannot read (type " +
+      std::to_string(static_cast<unsigned char>(data[n])) + ")");
 }
 
 }  // namespace ambar

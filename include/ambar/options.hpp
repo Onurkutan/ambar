@@ -62,6 +62,22 @@ struct Options {
   // scans after its binary search.
   int block_restart_interval = 16;
 
+  // Whether data blocks are compressed on the way to disk.
+  //
+  // kLz is an LZ77 coder written for this engine (src/compress.hpp): on
+  // keys and values with structure it makes a block a fraction of its size,
+  // which is that fraction off every table written, compacted and read from
+  // disk; on data with none it stores the block as it was, so the cost of
+  // asking is a pass over the block at write time.  What it costs a read is
+  // a decode per block the cache did not answer.  Off by default, so that
+  // the figures in docs/BENCHMARKS.md describe the engine as configured; a
+  // database written with it on is read by any build that has it, with it
+  // on or off, since the choice is recorded per block.  Index and filter
+  // blocks are never compressed: they are read once per open and held, so
+  // there is nothing to save.
+  enum class Compression { kNone, kLz };
+  Compression compression = Compression::kNone;
+
   // The largest a table file may grow during a compaction.
   size_t max_file_size = 2 * 1024 * 1024;
 

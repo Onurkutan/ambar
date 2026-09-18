@@ -4,6 +4,7 @@
 
 #include <cassert>
 
+#include "compress.hpp"
 #include "encoding.hpp"
 
 namespace ambar {
@@ -72,7 +73,7 @@ void TableBuilder::flush() {
   if (data_block_.empty()) return;
 
   assert(!pending_index_entry_);
-  write_block(&data_block_, &pending_handle_);
+  write_block(&data_block_, /*compressible=*/true, &pending_handle_);
   if (status_.is_ok()) {
     pending_index_entry_ = true;
     // Nothing is fsynced here.  A table under construction is not referenced
@@ -86,10 +87,23 @@ void TableBuilder::flush() {
   }
 }
 
-void TableBuilder::write_block(BlockBuilder* block, BlockHandle* handle) {
+void TableBuilder::write_block(BlockBuilder* block, bool compressible,
+                               BlockHandle* handle) {
   const std::string_view raw = block->finish();
-  // Compression is a reserved field, not an implemented one; see format.hpp.
-  write_raw_block(raw, CompressionType::kNone, handle);
+  CompressionType type = CompressionType::kNone;
+  std::string_view contents = raw;
+  if (compressible && options_.compression == Options::Compression::kLz) {
+    compressed_.clear();
+    compress_block(raw, &compressed_);
+    // Stored compressed only when that is smaller.  A block of bytes with
+    // no structure comes out a little larger than it went in, and would
+    // then cost a decode on every read to save nothing.
+    if (compressed_.size() < raw.size()) {
+      type = CompressionType::kLz;
+      contents = compressed_;
+    }
+  }
+  write_raw_block(contents, type, handle);
   block->reset();
 }
 
@@ -146,7 +160,7 @@ Status TableBuilder::finish() {
       filter_handle.encode_to(&handle_encoding);
       metaindex_block.add(key, handle_encoding);
     }
-    write_block(&metaindex_block, &metaindex_handle);
+    write_block(&metaindex_block, /*compressible=*/false, &metaindex_handle);
   }
 
   if (status_.is_ok()) {
@@ -159,7 +173,7 @@ Status TableBuilder::finish() {
       index_block_.add(last_key_, handle_encoding);
       pending_index_entry_ = false;
     }
-    write_block(&index_block_, &index_handle);
+    write_block(&index_block_, /*compressible=*/false, &index_handle);
   }
 
   if (status_.is_ok()) {

@@ -4,9 +4,9 @@
 
 A log-structured merge-tree storage engine in C++17, written from scratch: a
 write-ahead log, a concurrent skip list, immutable sorted table files with
-Bloom filters, a manifest, levelled compaction, snapshots, and a bounded block
-cache. About 10,000 lines of engine and 6,000 of tests and tools, with no
-dependencies beyond the standard library.
+Bloom filters, a manifest, levelled compaction, snapshots, a bounded block
+cache, and block compression. About 12,000 lines of engine and 13,000 of
+tests and tools, with no dependencies beyond the standard library.
 
 It is a learning project, and the interesting part is not that it works — it is
 what it took to find out that it did not.
@@ -44,6 +44,10 @@ ambar::Status status = db->get(ambar::ReadOptions(), "key", &value);
   has open is refused rather than allowed to destroy both copies.
 * **Damaged files produce errors, not crashes.** Every table file is treated as
   untrusted input.
+* **Optional block compression.** An LZ77 coder written here, so that its
+  decoder is fuzzed and bounded like every other parser in the engine; the
+  choice is recorded per block, and a file written with it on is read by a
+  build with it off.
 * **Repair.** A database whose manifest is lost or damaged is refused rather
   than guessed at, and `ambar_repair` rebuilds it from the table and log files
   that survive -- keeping what reads back, setting aside what does not, merging
@@ -235,7 +239,7 @@ engine, and the comment says what still is not.
     cmake --build build
     ./build/ambar_tests
 
-234 tests, no external framework. Also:
+241 tests, no external framework. Also:
 
     cmake -S . -B build-asan -DAMBAR_SANITIZE=address   # ASan + UBSan
     cmake -S . -B build-tsan -DAMBAR_SANITIZE=thread    # ThreadSanitizer
@@ -330,9 +334,9 @@ show.
 ## Limitations
 
 Stated so that the absence is a decision rather than something a reader has to
-discover: no compression (the format reserves the field), one compaction
-thread, no column families or transactions. `docs/DESIGN.md` says why for
-each. Repair rebuilds a database but not the history behind it: a key deleted
+discover: one compaction thread, no column families or transactions, and a
+compressor that is not LZ4's equal. `docs/DESIGN.md` says why for each.
+Repair rebuilds a database but not the history behind it: a key deleted
 before the damage can come back if a stale pre-compaction file survived, and
 `docs/DESIGN.md` says exactly when.
 

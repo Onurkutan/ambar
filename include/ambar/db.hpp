@@ -41,9 +41,9 @@ namespace ambar {
 // by one is not promised to open under another; a change to the format is a
 // change to this number, and docs/DESIGN.md says what changed.
 constexpr int kMajorVersion = 0;
-constexpr int kMinorVersion = 1;
+constexpr int kMinorVersion = 2;
 constexpr int kPatchVersion = 0;
-constexpr std::string_view kVersion = "0.1.0";
+constexpr std::string_view kVersion = "0.2.0";
 
 // A point in the database's history, held open.
 //

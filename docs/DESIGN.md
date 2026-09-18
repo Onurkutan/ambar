@@ -527,17 +527,60 @@ The manifest is a log of *edits* rather than a snapshot, so installing a
 compaction result is one small append plus one fsync, not a rewrite of the whole
 file set.
 
+### Compression
+
+With `Options::compression` set, each data block goes through
+`src/compress.hpp` on its way to disk: an LZ77 coder in the shape of LZ4 —
+a varint length, then tokens of literals and back-references — written here
+rather than taken from a library, because a decoder is a parser of untrusted
+bytes and every such parser in this project is its own, fuzzed
+(`fuzz/fuzz_compress.cpp`), and bounded at every read; `tests/test_compress.cpp`
+overruns each of the decoder's checks by hand and `mutations/compress.json`
+removes each in turn. The encoder is the cheapest matcher there is — a hash
+of each four-byte window, the first match taken. LZ4's default level is the
+same idea with years of tuning behind it, and its high-compression levels and
+zstd search harder and compress smaller; `docs/BENCHMARKS.md` will put the
+numbers side by side rather than pretend otherwise.
+
+The choice is recorded per block, not per file. The builder stores a block
+compressed only when that is smaller, and writes the trailer's type byte to
+say which it did, so a block of bytes with no structure costs no extra bytes
+and no decode, and a reader never has to know how a file was written: a build
+with compression off reads a file written with it on. The index, filter and
+metaindex are never compressed; they are read once per open and held, so
+there is nothing to save. The block cache holds decoded blocks and is charged
+their decoded size, so `Options::block_cache` bounds memory, as it says, and
+not bytes on disk. What compression costs a read is a decode per data block
+the cache did not answer; what it saves is that fraction off every table
+written, compacted and read from disk.
+
 ### Format stability
 
-The layout above is the format of version 0.1.0, and `ambar::kVersion` in
+The layout above is the format of version 0.2.0, and `ambar::kVersion` in
 the public header says which version a build is. Before 1.0 the format may
 change between minor versions, and a database written by one is not promised
 to open under another: a table's footer carries a magic number that says
 what kind of file it is, and nothing on disk says which version wrote it, so
-an older build reading a newer file would fail a checksum or a bounds check
-rather than a version check, and report damage. A change to the format is a
-change to the minor version, and this section will say what changed and from
-which version. Nothing has changed yet.
+in general an older build reading a newer file would fail a checksum or a
+bounds check rather than a version check, and report damage — except where
+the older format set a byte aside for the purpose, as the block trailer's
+type byte was. A change to the format is a change to the minor version, and
+this section says what changed and from which version.
+
+* **0.2.0 — a data block may be compressed.** The trailer's type byte,
+  written as 0 since the first version, may now be 1: the block's contents
+  are then the output of `src/compress.hpp`, and the checksum in the trailer
+  covers the compressed bytes and the type byte, as it always covered the
+  contents and the type byte. Index, filter and metaindex blocks are never
+  compressed. A 0.2.0 build reads every 0.1.0 file unchanged, since a type
+  byte of 0 means what it meant; a 0.1.0 build reading a 0.2.0 file with a
+  compressed block reports it as a compression it cannot read, which is
+  what the byte was reserved for — at the first read of such a block, not
+  at open, since opening a table reads only the blocks that are never
+  compressed. A 0.2.0 build says the same of a type byte it does not know,
+  as `kNotSupported` rather than `kCorruption`, because the checksum that
+  covers the byte has passed. Whether a build writes compressed blocks is
+  `Options::compression`, off by default.
 
 ## Compaction
 
@@ -611,6 +654,12 @@ Concretely, and each of these was a defect before it was a rule:
 * Every block handle is bounded by the size of the file it came from, not by a
   constant. A handle claiming a gigabyte in a forty-eight byte file used to
   allocate the gigabyte before discovering the file was short.
+* A compressed block declares its decoded length, and the decoder refuses
+  one above 255 times the bytes it was given — the most the format can
+  deliver — before reserving anything, so a hostile block of n bytes can
+  ask for 255n and no more. That is a cap where the handle bound is an
+  impossibility, and it is the price of decoding at all: the decoded size of
+  a block is not written anywhere the reader could check it first.
 * Entry lengths are widened before they are added. Two `uint32` lengths summed
   as `uint32` wrap: an entry declaring a key of `0xffffffff` bytes and a value
   of one summed to zero, passed a 32-bit bounds check, and copied four
@@ -628,7 +677,12 @@ Concretely, and each of these was a defect before it was a rule:
 `tests/test_corrupt.cpp` covers these, and also opens 132 randomly damaged
 copies of a real database — bit flips, truncations, runs of garbage — under
 AddressSanitizer, requiring only that each one produces a status rather than a
-crash.
+crash; and 132 more of a database written with compression on, where the
+checksum stands in front of the decoder. `tests/test_compressed_tables.cpp`
+takes the case the checksum cannot: every byte of a compressed block flipped
+in turn with the checksum forged over it, so that the decoder is reached, and
+the decoder refuses or survives each one; and a type byte no build knows,
+refused by name.
 
 A status rather than a crash is the floor. Two more rules sit above it, both
 about damage to the files that *describe* the database rather than the ones
@@ -747,6 +801,12 @@ which file it sits in.
   compare every key afterwards, and again after closing and reopening.
 * `tests/test_corrupt.cpp` — damaged and hostile files. See *Untrusted files*
   below.
+* `tests/test_compress.cpp` and `tests/test_compressed_tables.cpp` — the
+  block coder, and the engine's use of it: round trips and each decoder
+  check overrun by hand; then a database written with compression on read
+  back with it on and off, the trailer byte per block, the cache charged
+  the decoded size, and damage that reaches the decoder. See *Compression*
+  above.
 * `tools/crash_test` — runs a writer in a child process, kills it with `SIGKILL`
   at a random instant, reopens the database, and checks the durability contract
   above. Ordering bugs are invisible to ordinary tests and obvious to this one.
@@ -793,17 +853,13 @@ which file it sits in.
 Stated so that the absence is a decision rather than an omission a reader has
 to discover.
 
-* **Compression, in the engine.** The block trailer reserves a type byte and
-  the reader refuses a type it cannot handle, so adding it later does not
-  change the format for existing files. The codec exists — `src/compress.hpp`
-  is an LZ77 coder in the shape of LZ4, written here rather than taken from
-  a library because its decoder is a parser of untrusted bytes and every
-  such parser in this project is its own, fuzzed, and bounded at every read;
-  `tests/test_compress.cpp` overruns each of its checks by hand and
-  `mutations/compress.json` removes each in turn — but no block is written
-  compressed yet. Wiring it into the table format is a change to the format,
-  and so to the minor version, and comes with its own measurement of what
-  it costs a read and saves on disk.
+* **A better compressor.** The coder in `src/compress.hpp` takes the first
+  match its hash table offers and stops there; LZ4's high-compression
+  levels search further back and zstd adds an entropy model, and both
+  compress the same data smaller. The block cache holds decoded blocks, so
+  a better coder would change what a decode costs and nothing after it.
+  Not done because the point of writing the coder was to own the decoder,
+  not to win on ratio.
 * **Parallel compaction.** One background thread. Compaction is IO bound and
   its inputs and outputs are ordered with respect to each other, so a second
   thread would mostly contend for the same lock; doing it properly needs

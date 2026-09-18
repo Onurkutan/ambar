@@ -1,0 +1,53 @@
+{
+  "_comment": "Compression in the table format: the builder's choice per block, the trailer byte that records it, and the reader's handling of it. compress.json covers the codec; these are the seams around it. tests/test_compressed_tables.cpp catches each: a builder that ignores the option, or compresses the index, or keeps the compressed bytes when they are larger, changes the sizes and trailer bytes the tests read off disk; a builder that writes compressed bytes under the raw type, or a reader that skips the decode, hands a stream to the block parser; a reader that drops a decode failure, or reads an unknown type as raw, loses the refusal the forged-checksum test looks for by name; a reader that keeps decoded blocks out of the cache, or charges what was on disk, changes what the cache reports holding.",
+  "builder: compress every data block whatever the option says": [
+    "src/table_builder.cpp",
+    "  if (compressible && options_.compression == Options::Compression::kLz) {",
+    "  if (compressible) {"
+  ],
+  "builder: compress the index and metaindex too": [
+    "src/table_builder.cpp",
+    "  if (compressible && options_.compression == Options::Compression::kLz) {",
+    "  (void)compressible;\n  if (options_.compression == Options::Compression::kLz) {"
+  ],
+  "builder: keep the compressed block only when it is larger": [
+    "src/table_builder.cpp",
+    "    if (compressed_.size() < raw.size()) {",
+    "    if (compressed_.size() > raw.size()) {"
+  ],
+  "builder: write the compressed bytes under the raw type": [
+    "src/table_builder.cpp",
+    "      type = CompressionType::kLz;\n      contents = compressed_;",
+    "      contents = compressed_;"
+  ],
+  "format: number the compressed type 2": [
+    "src/format.hpp",
+    "  kLz = 0x1,",
+    "  kLz = 0x2,"
+  ],
+  "reader: hand the compressed bytes to the block parser": [
+    "src/format.cpp",
+    "      status = decompress_block(std::string_view(data, static_cast<size_t>(n)),\n                                &decoded);",
+    "      decoded.assign(data, static_cast<size_t>(n));"
+  ],
+  "reader: ignore a decode failure": [
+    "src/format.cpp",
+    "      if (!status.is_ok()) {\n        return Status::corruption(\"compressed block at offset \" +\n                                  std::to_string(handle.offset()) +\n                                  \" does not decode: \" + status.message());\n      }",
+    "      ;"
+  ],
+  "reader: read an unknown type as raw": [
+    "src/format.cpp",
+    "    case CompressionType::kNone:\n      if (read_into_buffer) {",
+    "    default:\n      if (read_into_buffer) {"
+  ],
+  "reader: keep a decoded block out of the cache": [
+    "src/format.cpp",
+    "      result->cachable = true;\n      return Status::ok();\n    }",
+    "      result->cachable = false;\n      return Status::ok();\n    }"
+  ],
+  "reader: charge the cache the size on disk": [
+    "src/table.cpp",
+    "      const size_t charge =\n          block->size() > 0 ? block->size() : sizeof(Block) + key.size();",
+    "      const size_t charge = handle.size() > 0\n                                ? static_cast<size_t>(handle.size())\n                                : sizeof(Block) + key.size();"
+  ]
+}
