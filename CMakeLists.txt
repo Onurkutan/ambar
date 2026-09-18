@@ -152,6 +152,12 @@ add_executable(ambar_bench tools/bench.cpp)
 target_link_libraries(ambar_bench PRIVATE ambar Threads::Threads)
 target_include_directories(ambar_bench PRIVATE src)
 
+# The block coder over the data blocks of an existing database: ratio and
+# rate, and a dump for tools/compare_codecs.py to run zlib and LZ4 over.
+add_executable(ambar_codec_bench tools/codec_bench.cpp)
+target_link_libraries(ambar_codec_bench PRIVATE ambar Threads::Threads)
+target_include_directories(ambar_codec_bench PRIVATE src)
+
 # SQLite is optional.  Without it the benchmark still runs and says plainly
 # that it has nothing to compare against, rather than printing numbers with
 # no context.

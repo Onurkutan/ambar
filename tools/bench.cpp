@@ -35,7 +35,7 @@
 // choosing a cache size, and is invisible in a single measurement.
 //
 // Usage: bench <dir> [--keys N] [--value-size N] [--cache-mb N] [--threads N]
-//              [--write-buffer-mb N] [--no-sqlite]
+//              [--write-buffer-mb N] [--compression none|lz] [--no-sqlite]
 
 #include <algorithm>
 #include <chrono>
@@ -76,6 +76,10 @@ struct Config {
   // phases with no flush and no compaction in the way, which is the
   // writer queue on its own.  Both are worth seeing, and they differ.
   int write_buffer_mb = 4;
+  // Off is the engine as configured.  The same run with it on is what
+  // compression costs a write and a read and saves on disk, and the two
+  // are read side by side in docs/BENCHMARKS.md.
+  Options::Compression compression = Options::Compression::kNone;
   bool use_sqlite = true;
 };
 
@@ -475,6 +479,7 @@ void bench_ambar(const Config& config) {
   options.block_cache = cache.get();
   options.write_buffer_size = static_cast<size_t>(config.write_buffer_mb)
                               << 20;
+  options.compression = config.compression;
 
   std::unique_ptr<DB> db;
   const Status status = DB::open(options, path, &db);
@@ -647,7 +652,13 @@ void bench_ambar(const Config& config) {
     // SQLite's rate and scans at half of it too; with the whole database
     // resident it reads faster than SQLite and scans at about the same speed.
     std::printf("\n  by block cache size, on a freshly opened database\n");
-    const uint64_t data_bytes = directory_bytes(path);
+    // The data the cache is measured against is what it would hold with
+    // everything resident: decoded blocks.  With compression off that is
+    // the directory; with it on, the directory is a fraction of it and the
+    // keys and values handed in are the nearer figure, a couple of percent
+    // under the decoded blocks with their restart arrays and trailers.
+    const uint64_t data_bytes =
+        std::max(directory_bytes(path), sizes.user_bytes);
     db.reset();  // close, so each cache size starts cold
 
     for (const int mb : {1, 8, 64, 256}) {
@@ -859,6 +870,14 @@ int main(int argc, char** argv) {
       config.threads = std::max(1, std::atoi(argv[++i]));
     } else if (arg == "--write-buffer-mb" && i + 1 < argc) {
       config.write_buffer_mb = std::max(1, std::atoi(argv[++i]));
+    } else if (arg == "--compression" && i + 1 < argc) {
+      const std::string which = argv[++i];
+      if (which == "lz") {
+        config.compression = Options::Compression::kLz;
+      } else if (which != "none") {
+        std::fprintf(stderr, "--compression takes none or lz\n");
+        return 2;
+      }
     } else if (arg == "--no-sqlite") {
       config.use_sqlite = false;
     } else if (arg[0] != '-') {
@@ -870,11 +889,12 @@ int main(int argc, char** argv) {
 
   std::printf("ambar benchmark\n");
   std::printf("  %d keys, %d-byte values, %d MB block cache, %d MB memtable, "
-              "%.0f MB of user data\n",
+              "%.0f MB of user data, compression %s\n",
               config.keys, config.value_size, config.cache_mb,
               config.write_buffer_mb,
               static_cast<double>(config.keys) *
-                  static_cast<double>(config.value_size + 16) / 1048576.0);
+                  static_cast<double>(config.value_size + 16) / 1048576.0,
+              config.compression == Options::Compression::kLz ? "on" : "off");
   std::printf("\n  These numbers describe this machine and this filesystem.\n"
               "  An LSM tree's write path is dominated by how the storage\n"
               "  handles fsync, which varies by an order of magnitude between\n"
