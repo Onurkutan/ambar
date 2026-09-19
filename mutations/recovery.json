@@ -1,5 +1,5 @@
 {
-  "_comment": "Faults in the open path. Each is caught by the unit suite, so tools/mutate.py runs them directly.",
+  "_comment": "Faults in the open path. Each is caught by the unit suite, so tools/mutate.py runs them directly. One is gone with the code it broke: appending to a manifest whose tail was torn, which no longer has a line to mutate since the manifest is written fresh at every open (docs/DESIGN.md, After an I/O error) and nothing appends to an old one.",
 
   "open: create a new database over one that has lost CURRENT": [
     "src/db_impl.cpp",
@@ -15,11 +15,6 @@
     "src/version_set.cpp",
     "    if (status.is_ok() && reader.damaged()) {",
     "    if (false && reader.damaged()) {"
-  ],
-  "manifest recovery: append to a manifest whose tail was torn": [
-    "src/version_set.cpp",
-    "  if (!torn && parsed && file_size(manifest_path, &size).is_ok() &&",
-    "  if (parsed && file_size(manifest_path, &size).is_ok() &&"
   ],
   "log recovery: replay up to a hole in the middle and call it the prefix": [
     "src/db_impl.cpp",
