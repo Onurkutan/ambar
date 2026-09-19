@@ -2,7 +2,7 @@
 
 #include "format.hpp"
 
-#include <cstring>
+#include <memory>
 #include <string>
 
 #include "compress.hpp"
@@ -127,22 +127,28 @@ Status read_block(RandomAccessFile* file, uint64_t file_size,
       return Status::ok();
 
     case CompressionType::kLz: {
-      // Decoded into memory of its own, whoever owns the bytes read; the
+      // Decoded straight into memory of its own, sized from the length
+      // the stream declares -- after the decoder has bounded that length
+      // by the bytes there are -- whoever owns the bytes read.  The
       // checksum above has passed, so what is being decoded is what was
-      // written, and the decoder still refuses anything it cannot bound --
+      // written, and the decoder still refuses anything it cannot bound:
       // a checksum says the bytes are the ones written, not that the
       // writer was this engine.
-      std::string decoded;
-      status = decompress_block(std::string_view(data, static_cast<size_t>(n)),
-                                &decoded);
+      size_t length = 0;
+      std::string_view body;
+      status = compressed_length(std::string_view(data, static_cast<size_t>(n)),
+                                 &length, &body);
+      std::unique_ptr<char[]> owned;
+      if (status.is_ok()) {
+        owned.reset(new char[length > 0 ? length : 1]);
+        status = decompress_into(body, owned.get(), length);
+      }
       if (!status.is_ok()) {
         return Status::corruption("compressed block at offset " +
                                   std::to_string(handle.offset()) +
                                   " does not decode: " + status.message());
       }
-      char* owned = new char[decoded.size() > 0 ? decoded.size() : 1];
-      std::memcpy(owned, decoded.data(), decoded.size());
-      result->data = std::string_view(owned, decoded.size());
+      result->data = std::string_view(owned.release(), length);
       result->heap_allocated = true;
       result->cachable = true;
       return Status::ok();

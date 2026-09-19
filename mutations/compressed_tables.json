@@ -27,8 +27,8 @@
   ],
   "reader: hand the compressed bytes to the block parser": [
     "src/format.cpp",
-    "      status = decompress_block(std::string_view(data, static_cast<size_t>(n)),\n                                &decoded);",
-    "      decoded.assign(data, static_cast<size_t>(n));"
+    "        status = decompress_into(body, owned.get(), length);",
+    "        std::memset(owned.get(), 0, length);\n        std::memcpy(owned.get(), body.data(), body.size() < length ? body.size() : length);"
   ],
   "reader: ignore a decode failure": [
     "src/format.cpp",

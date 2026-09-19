@@ -51,13 +51,30 @@ void compress_block(std::string_view input, std::string* output);
 // is what it sizes its output to before it writes.
 size_t max_compressed_size(size_t n);
 
-// Decodes what compress_block produced into *output, replacing its
-// contents.  Any input at all may be handed in; a malformed one is refused
-// with kCorruption, and *output is then sized to the length the stream
-// declared and holds whatever was decoded before the refusal, which no
-// caller should read.  The decoded length is what the stream declared,
-// checked as it is produced, so a stream that claims more than it
-// delivers, or delivers more than it claims, is refused too.
+// Decoding is two steps, so that a caller who wants the bytes in memory
+// of its own -- the table reader, whose block cache takes ownership of a
+// buffer -- can size that memory from the first and decode into it with
+// the second, and a caller who does not can take the two together.
+//
+// The length a stream declares, and the bytes that follow it.  Refuses a
+// stream with no length, and one that declares more than its bytes could
+// deliver, 255 per byte of input, which is what keeps a hostile block
+// from asking for an allocation of any size it likes; a caller allocates
+// `*length` after this and not before.
+Status compressed_length(std::string_view input, size_t* length,
+                         std::string_view* body);
+
+// Decodes `body` -- what compressed_length left after the length -- into
+// `output`, which has room for `length` bytes.  Any bytes at all may be
+// handed in; a malformed stream is refused with kCorruption, and what was
+// decoded before the refusal is left in `output`, which no caller should
+// read.  No write goes past `length`, whatever the stream says: the
+// length is what the stream declared, checked as the bytes are produced,
+// so a stream that claims more than it delivers, or delivers more than it
+// claims, is refused too.
+Status decompress_into(std::string_view body, char* output, size_t length);
+
+// The two together, into a string sized to the declared length.
 Status decompress_block(std::string_view input, std::string* output);
 
 }  // namespace ambar

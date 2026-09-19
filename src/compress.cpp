@@ -187,9 +187,8 @@ void compress_block(std::string_view input, std::string* output) {
   output->resize(static_cast<size_t>(out - output->data()));
 }
 
-Status decompress_block(std::string_view input, std::string* output) {
-  output->clear();
-
+Status compressed_length(std::string_view input, size_t* length,
+                         std::string_view* body) {
   uint32_t declared = 0;
   if (!get_varint32(&input, &declared)) {
     return Status::corruption("compressed block has no length");
@@ -206,13 +205,29 @@ Status decompress_block(std::string_view input, std::string* output) {
     return Status::corruption(
         "compressed block declares more than its bytes could deliver");
   }
-  // Sized once, written in place.  Every write below is bounded by what
-  // the declared size has room for, checked before the copy, so there is
-  // no per-byte check to pay and nothing to grow; `produced` is how far
-  // the writing has got.  On a refusal the string holds whatever was
-  // written before it, which no caller reads.
+  *length = total;
+  *body = input;
+  return Status::ok();
+}
+
+Status decompress_block(std::string_view input, std::string* output) {
+  output->clear();
+  size_t total = 0;
+  std::string_view body;
+  Status status = compressed_length(input, &total, &body);
+  if (!status.is_ok()) return status;
+  // Sized once, written in place.  On a refusal the string holds whatever
+  // was written before it, which no caller reads.
   output->resize(total);
-  char* const out = output->data();
+  return decompress_into(body, output->data(), total);
+}
+
+Status decompress_into(std::string_view input, char* out, size_t total) {
+  // Every write below is bounded by what `total` has room for, checked
+  // before the copy, so there is no per-byte check to pay; `produced` is
+  // how far the writing has got.  A stream that declared more than
+  // `total` -- a caller that passed a smaller buffer than the length it
+  // was given -- overruns the room and is refused like any other.
   size_t produced = 0;
 
   const char* p = input.data();
