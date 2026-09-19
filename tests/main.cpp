@@ -7,9 +7,22 @@
 // check -- a sanitizer report, or a null dereference after a failed check.
 // The CI workflow passes it for that reason.
 
+#include <cstdlib>
 #include <cstring>
+#include <new>
 
 #include "harness.hpp"
+
+// Every allocation in the test binary passes through here and is counted
+// for the thread that made it; see ambar::testing::thread_allocations().
+// The cost is one increment of a thread-local, which no test can notice.
+void* operator new(std::size_t n) {
+  ++ambar::testing::thread_allocations();
+  if (void* p = std::malloc(n > 0 ? n : 1)) return p;
+  throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 
 int main(int argc, char** argv) {
   const char* filter = nullptr;

@@ -161,17 +161,26 @@ void delete_cached_block(void* value) {
 
 }  // namespace
 
-Iterator* Table::block_reader(void* arg, const ReadOptions& options,
-                              std::string_view index_value) {
-  auto* table = reinterpret_cast<Table*>(arg);
-  Rep* rep = table->rep_.get();
+void Table::BlockRef::release() {
+  if (handle != nullptr) {
+    cache->release(handle);
+  } else if (owned) {
+    delete block;
+  }
+  block = nullptr;
+  handle = nullptr;
+  owned = false;
+}
+
+Status Table::block_for(const ReadOptions& options,
+                        std::string_view index_value, BlockRef* ref) const {
+  Rep* rep = rep_.get();
+  ref->release();
 
   BlockHandle handle;
   std::string_view input = index_value;
   Status status = handle.decode_from(&input);
-  if (!status.is_ok()) {
-    return new_error_iterator(status);
-  }
+  if (!status.is_ok()) return status;
 
   Cache* cache = rep->options.block_cache;
 
@@ -185,14 +194,15 @@ Iterator* Table::block_reader(void* arg, const ReadOptions& options,
     const std::string_view key(cache_key, sizeof(cache_key));
 
     if (Cache::Handle* found = cache->lookup(key); found != nullptr) {
-      auto* block = reinterpret_cast<Block*>(cache->value(found));
-      return new CachedBlockIterator(cache, found,
-                                     block->new_iterator(rep->comparator));
+      ref->block = reinterpret_cast<Block*>(cache->value(found));
+      ref->cache = cache;
+      ref->handle = found;
+      return Status::ok();
     }
 
     BlockContents contents;
     status = read_block(rep->file, rep->file_size, handle, &contents);
-    if (!status.is_ok()) return new_error_iterator(status);
+    if (!status.is_ok()) return status;
 
     auto* block = new Block(contents);
     if (contents.cachable && options.fill_cache) {
@@ -204,23 +214,43 @@ Iterator* Table::block_reader(void* arg, const ReadOptions& options,
       // never reclaim.
       const size_t charge =
           block->size() > 0 ? block->size() : sizeof(Block) + key.size();
-      Cache::Handle* inserted =
-          cache->insert(key, block, charge, &delete_cached_block);
-      return new CachedBlockIterator(cache, inserted,
-                                     block->new_iterator(rep->comparator));
+      ref->block = block;
+      ref->cache = cache;
+      ref->handle = cache->insert(key, block, charge, &delete_cached_block);
+      return Status::ok();
     }
     // Not cachable, or a scan that asked not to pollute the cache: the
-    // iterator owns the block and it dies with the read.
-    return new OwningBlockIterator(block, block->new_iterator(rep->comparator));
+    // caller owns the block and it dies with the read.
+    ref->block = block;
+    ref->owned = true;
+    return Status::ok();
   }
 
   BlockContents contents;
   status = read_block(rep->file, rep->file_size, handle, &contents);
-  if (!status.is_ok()) return new_error_iterator(status);
+  if (!status.is_ok()) return status;
+  ref->block = new Block(contents);
+  ref->owned = true;
+  return Status::ok();
+}
 
-  auto* block = new Block(contents);
-  (void)options;
-  return new OwningBlockIterator(block, block->new_iterator(rep->comparator));
+Iterator* Table::block_reader(void* arg, const ReadOptions& options,
+                              std::string_view index_value) {
+  auto* table = reinterpret_cast<Table*>(arg);
+  BlockRef ref;
+  const Status status = table->block_for(options, index_value, &ref);
+  if (!status.is_ok()) return new_error_iterator(status);
+  Iterator* inner = ref.block->new_iterator(table->rep_->comparator);
+  // The iterator takes over what the ref holds; the ref must not let go
+  // of it when it dies.
+  Block* block = ref.block;
+  Cache* cache = ref.cache;
+  Cache::Handle* handle = ref.handle;
+  ref.block = nullptr;
+  ref.handle = nullptr;
+  ref.owned = false;
+  if (handle != nullptr) return new CachedBlockIterator(cache, handle, inner);
+  return new OwningBlockIterator(block, inner);
 }
 
 Iterator* Table::new_iterator(const ReadOptions& options) const {
@@ -233,13 +263,21 @@ Status Table::internal_get(const ReadOptions& options, std::string_view key,
                            void* arg,
                            void (*handle_result)(void*, std::string_view,
                                                  std::string_view)) const {
-  std::unique_ptr<Iterator> index_iter(
-      rep_->index_block->new_iterator(rep_->comparator));
-  index_iter->seek(key);
-  if (!index_iter->valid()) return index_iter->status();
+  // Two point lookups, in the index and then in one data block, through
+  // Block::find rather than through iterators: a lookup used to make five
+  // heap allocations here -- two iterators, the keys each rebuilt, and the
+  // wrapper that held the cache handle -- and now makes one, the string
+  // both finds rebuild their keys into.
+  std::string found_key;
+  std::string_view index_value;
+  Status status;
+  if (!rep_->index_block->find(rep_->comparator, key, &found_key,
+                               &index_value, &status)) {
+    return status;  // past the last block, or a block that does not parse
+  }
 
   BlockHandle handle;
-  std::string_view handle_value = index_iter->value();
+  std::string_view handle_value = index_value;
 
   // The filter is consulted before the data block is read, which is the whole
   // point of having one: a key that is not in this table costs an in-memory
@@ -249,14 +287,14 @@ Status Table::internal_get(const ReadOptions& options, std::string_view key,
     return Status::ok();  // definitely not here
   }
 
-  std::unique_ptr<Iterator> block_iter(
-      block_reader(const_cast<Table*>(this), options, index_iter->value()));
-  block_iter->seek(key);
-  if (block_iter->valid()) {
-    handle_result(arg, block_iter->key(), block_iter->value());
+  BlockRef ref;
+  status = block_for(options, index_value, &ref);
+  if (!status.is_ok()) return status;
+  std::string_view value;
+  if (ref.block->find(rep_->comparator, key, &found_key, &value, &status)) {
+    handle_result(arg, found_key, value);
   }
-  Status status = block_iter->status();
-  if (status.is_ok()) status = index_iter->status();
+  ref.release();
   return status;
 }
 

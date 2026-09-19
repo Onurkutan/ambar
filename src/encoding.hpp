@@ -33,6 +33,17 @@ inline void encode_fixed64(char* dst, uint64_t value) {
   }
 }
 
+// A varint32 written at `dst`, which has room for five bytes; returns the
+// position after it.  The same encoding put_varint32 below appends.
+inline char* encode_varint32(char* dst, uint32_t value) {
+  while (value >= 0x80) {
+    *dst++ = static_cast<char>((value & 0x7f) | 0x80);
+    value >>= 7;
+  }
+  *dst++ = static_cast<char>(value);
+  return dst;
+}
+
 inline void put_fixed32(std::string* dst, uint32_t value) {
   char buf[4];
   encode_fixed32(buf, value);

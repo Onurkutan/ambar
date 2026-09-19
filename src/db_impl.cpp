@@ -879,13 +879,15 @@ Status DBImpl::get(const ReadOptions& options, std::string_view key,
   lock.unlock();
 
   // Newest source first, stopping at the first definite answer -- including
-  // a tombstone, which is definite.
-  if (mem->get(key, snapshot, value, &status)) {
+  // a tombstone, which is definite.  One key for all three: each layer used
+  // to build its own, on the heap.
+  const LookupKey lookup(key, snapshot);
+  if (mem->get(lookup, value, &status)) {
     // answered
-  } else if (imm != nullptr && imm->get(key, snapshot, value, &status)) {
+  } else if (imm != nullptr && imm->get(lookup, value, &status)) {
     // answered
   } else {
-    status = current->get(options, key, snapshot, value, &stats);
+    status = current->get(options, lookup, value, &stats);
   }
 
   // The mutex is not taken again on the way out.  It used to be, for the

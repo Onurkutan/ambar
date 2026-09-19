@@ -74,6 +74,22 @@ class Table {
   static Iterator* block_reader(void* arg, const ReadOptions& options,
                                 std::string_view index_value);
 
+  // A data block, from the cache or the file, and how to let it go: a
+  // cache handle to release, or a block of this reader's own to delete.
+  struct BlockRef {
+    Block* block = nullptr;
+    Cache* cache = nullptr;
+    Cache::Handle* handle = nullptr;
+    bool owned = false;
+    BlockRef() = default;
+    BlockRef(const BlockRef&) = delete;
+    BlockRef& operator=(const BlockRef&) = delete;
+    ~BlockRef() { release(); }
+    void release();
+  };
+  Status block_for(const ReadOptions& options, std::string_view index_value,
+                   BlockRef* ref) const;
+
   std::unique_ptr<Rep> rep_;
 };
 

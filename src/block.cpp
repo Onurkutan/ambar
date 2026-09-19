@@ -296,4 +296,84 @@ Iterator* Block::new_iterator(const Comparator* comparator) const {
   return new Iter(comparator, data_, restart_offset_, num_restarts_);
 }
 
+bool Block::find(const Comparator* comparator, std::string_view target,
+                 std::string* key, std::string_view* value,
+                 Status* status) const {
+  *status = Status::ok();
+  if (size_ < sizeof(uint32_t)) {
+    *status = Status::corruption("block is too small");
+    return false;
+  }
+  if (num_restarts_ == 0) return false;
+
+  const char* const limit = data_ + restart_offset_;
+  const auto restart_point = [&](uint32_t index) {
+    return decode_fixed32(data_ + restart_offset_ + index * sizeof(uint32_t));
+  };
+  const auto corrupted = [&](const char* what) {
+    *status = Status::corruption(std::string("bad block entry: ") + what);
+    return false;
+  };
+
+  // The same two halves as the iterator's seek: a binary search over the
+  // restart points for the last whose key is below the target, then a
+  // walk of at most one restart interval.  Every offset and length is
+  // checked against the block before it is used, as there.
+  uint32_t left = 0;
+  uint32_t right = num_restarts_ - 1;
+  while (left < right) {
+    const uint32_t mid = (left + right + 1) / 2;
+    const uint32_t region_offset = restart_point(mid);
+    if (region_offset >= restart_offset_) {
+      return corrupted("restart point lies outside the entry region");
+    }
+    uint32_t shared = 0;
+    uint32_t non_shared = 0;
+    uint32_t value_length = 0;
+    const char* key_ptr = decode_entry(data_ + region_offset, limit, &shared,
+                                       &non_shared, &value_length);
+    if (key_ptr == nullptr || shared != 0) {
+      return corrupted("restart point does not begin a key");
+    }
+    if (non_shared < comparator->min_key_length) {
+      return corrupted("restart key is too short for this comparator");
+    }
+    if (comparator->compare(std::string_view(key_ptr, non_shared), target) <
+        0) {
+      left = mid;
+    } else {
+      right = mid - 1;
+    }
+  }
+
+  const uint32_t start = restart_point(left);
+  if (start > restart_offset_) {
+    return corrupted("restart point lies outside the entry region");
+  }
+  key->clear();
+  const char* p = data_ + start;
+  while (p < limit) {
+    uint32_t shared = 0;
+    uint32_t non_shared = 0;
+    uint32_t value_length = 0;
+    p = decode_entry(p, limit, &shared, &non_shared, &value_length);
+    if (p == nullptr) return corrupted("entry runs past the end of the block");
+    if (shared > key->size()) {
+      return corrupted("shared prefix longer than the previous key");
+    }
+    key->resize(shared);
+    key->append(p, non_shared);
+    if (key->size() < comparator->min_key_length) {
+      return corrupted("key is too short for this comparator");
+    }
+    p += non_shared;
+    if (comparator->compare(*key, target) >= 0) {
+      *value = std::string_view(p, value_length);
+      return true;
+    }
+    p += value_length;
+  }
+  return false;  // every entry is below the target
+}
+
 }  // namespace ambar

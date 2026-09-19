@@ -55,23 +55,19 @@ void MemTable::add(SequenceNumber sequence, ValueType type,
   table_.insert(buffer);
 }
 
-bool MemTable::get(std::string_view key, SequenceNumber snapshot,
-                   std::string* value, Status* status) const {
-  // Seek to the newest version of `key` at or below `snapshot`.  Because
+bool MemTable::get(const LookupKey& key, std::string* value,
+                   Status* status) const {
+  // Seek to the newest version of the key at or below the snapshot.  Because
   // internal keys sort by user key ascending then sequence descending, that
-  // entry is the first one at or after the lookup key.
-  const std::string lookup = make_lookup_key(key, snapshot);
-  std::string encoded_lookup;
-  put_varint32(&encoded_lookup, static_cast<uint32_t>(lookup.size()));
-  encoded_lookup.append(lookup);
-
+  // entry is the first one at or after the lookup key, whose memtable form
+  // is the length-prefixed one the skip list holds.
   Table::Iterator iter(&table_);
-  iter.seek(encoded_lookup.data());
+  iter.seek(key.memtable_key().data());
   if (!iter.valid()) return false;
 
   const char* entry = iter.key();
   const std::string_view internal_key = read_length_prefixed(&entry);
-  if (extract_user_key(internal_key) != key) {
+  if (extract_user_key(internal_key) != key.user_key()) {
     // Landed on a different user key: this memtable has nothing to say.
     return false;
   }

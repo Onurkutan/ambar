@@ -32,6 +32,15 @@ inline int& failure_count() {
   return failures;
 }
 
+// Heap allocations made by the calling thread since the process started.
+// tests/main.cpp replaces the global operator new to count them, so a test
+// can say how many a lookup makes -- a number that was nine before anyone
+// looked, and is what a cheap operation's cost is made of.
+inline unsigned long long& thread_allocations() {
+  thread_local unsigned long long count = 0;
+  return count;
+}
+
 // Failure messages are flushed as they are written.
 //
 // A test that fails a check and then crashes -- dereferencing the null pointer

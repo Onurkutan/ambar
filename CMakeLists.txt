@@ -65,6 +65,7 @@ add_library(ambar
   src/status.cpp
   src/arena.cpp
   src/encoding.cpp
+  src/dbformat.cpp
   src/memtable.cpp
   src/file.cpp
   src/wal.cpp
@@ -108,6 +109,7 @@ add_executable(ambar_tests
   tests/test_memtable.cpp
   tests/test_write_batch.cpp
   tests/test_bloom.cpp
+  tests/test_block.cpp
   tests/test_cache.cpp
   tests/test_compress.cpp
   tests/test_compressed_tables.cpp
@@ -157,6 +159,11 @@ target_include_directories(ambar_bench PRIVATE src)
 add_executable(ambar_codec_bench tools/codec_bench.cpp)
 target_link_libraries(ambar_codec_bench PRIVATE ambar Threads::Threads)
 target_include_directories(ambar_codec_bench PRIVATE src)
+
+# Resident lookups on an existing database, by thread count and working
+# set, with the allocations each makes counted: the read path's CPU cost.
+add_executable(ambar_lookup_probe tools/lookup_probe.cpp)
+target_link_libraries(ambar_lookup_probe PRIVATE ambar Threads::Threads)
 
 # SQLite is optional.  Without it the benchmark still runs and says plainly
 # that it has nothing to compare against, rather than printing numbers with

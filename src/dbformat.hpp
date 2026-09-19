@@ -123,4 +123,36 @@ inline std::string make_lookup_key(std::string_view user_key,
   return make_internal_key(user_key, snapshot, kValueTypeForSeek);
 }
 
+// The same target, built once per lookup and in space of its own, in the
+// three forms the layers below want: the memtable's, a varint32 length and
+// then the internal key; the internal key; and the user key.  A lookup used
+// to build the memtable's form and the table's form separately, each on the
+// heap, and the allocations were a fifth of what a cached lookup cost; a
+// key shorter than the space here -- nearly every key -- costs none.
+class LookupKey {
+ public:
+  LookupKey(std::string_view user_key, SequenceNumber snapshot);
+  ~LookupKey();
+
+  LookupKey(const LookupKey&) = delete;
+  LookupKey& operator=(const LookupKey&) = delete;
+
+  std::string_view memtable_key() const {
+    return std::string_view(start_, static_cast<size_t>(end_ - start_));
+  }
+  std::string_view internal_key() const {
+    return std::string_view(kstart_, static_cast<size_t>(end_ - kstart_));
+  }
+  std::string_view user_key() const {
+    return std::string_view(kstart_, static_cast<size_t>(end_ - kstart_ - 8));
+  }
+
+ private:
+  // [start_, kstart_) is the length, [kstart_, end_) the internal key.
+  const char* start_;
+  const char* kstart_;
+  const char* end_;
+  char space_[200];  // enough for any key an application is likely to use
+};
+
 }  // namespace ambar

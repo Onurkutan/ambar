@@ -62,14 +62,19 @@ class MemTable {
   void add(SequenceNumber sequence, ValueType type, std::string_view key,
            std::string_view value);
 
-  // Looks up `key` as of `snapshot`.
+  // Looks up the key as of the snapshot the LookupKey was built for.
   //
   // Returns true when this memtable answers the question, which includes
   // answering it with "deleted": a tombstone is a definitive negative and must
   // stop the search rather than let an older table supply a stale value.  In
   // that case *status is set to not-found.
+  bool get(const LookupKey& key, std::string* value, Status* status) const;
+
+  // The same, building the key here: for callers with one lookup to make.
   bool get(std::string_view key, SequenceNumber snapshot, std::string* value,
-           Status* status) const;
+           Status* status) const {
+    return get(LookupKey(key, snapshot), value, status);
+  }
 
   // Ordered traversal over internal keys, used when flushing to a table.
   class Iterator {

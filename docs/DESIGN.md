@@ -201,6 +201,27 @@ lookups fail, and only when a filter is configured. `src/internal_filter_policy.
 carries the wrapper and the story; `tests/test_table.cpp` pins the failure so
 that removing the wrapper turns the suite red instead of losing lookups.
 
+What a lookup costs the CPU when the disk is not involved was measured by
+removal, with a probe (`tools/lookup_probe`) that ran resident lookups on the
+benchmark database and a build with one suspect at a time taken out. The database mutex at the top
+of `get`, the reference counts, the block cache's lock and list moves — each
+was worth a few percent. What was worth a fifth was the heap: a lookup made
+nine allocations, and a build whose allocator was a thread-local free list
+ran a fifth faster on a wide working set and a third faster on a hot one. So
+the nine became one. The lookup key is built once, in `LookupKey`, in space
+inside the object, in the three forms the layers want — the memtable's
+length-prefixed form, the internal key, the user key — where the memtable and
+the version each used to build their own on the heap. Level 0 is searched
+newest-first by finding the newest file not yet searched on each pass, rather
+than by sorting a list of candidates. And a table is probed through
+`Block::find`, a point lookup that does what the iterator's seek does with no
+iterator: the index block and then the data block each used to cost an
+iterator object and the string it rebuilt keys into, and the data block a
+wrapper holding its cache handle besides. The one allocation left is the
+string the found key is rebuilt into, since a block's keys share prefixes and
+rarely exist whole. `tests/test_db.cpp` counts them, through a test binary
+whose `operator new` counts on the calling thread, and holds the count at one.
+
 ### Two comparators
 
 Internal keys are ordered by user key ascending, then by the trailing eight
@@ -808,6 +829,9 @@ which file it sits in.
   compare every key afterwards, and again after closing and reopening.
 * `tests/test_corrupt.cpp` — damaged and hostile files. See *Untrusted files*
   below.
+* `tests/test_block.cpp` — `Block::find`, the point lookup without an
+  iterator, against the iterator's seek on every target a block can be asked
+  about, and on blocks that do not parse. See *The read path* above.
 * `tests/test_compress.cpp` and `tests/test_compressed_tables.cpp` — the
   block coder, and the engine's use of it: round trips and each decoder
   check overrun by hand; then a database written with compression on read
@@ -831,6 +855,9 @@ which file it sits in.
 * `tools/codec_bench` with `tools/compare_codecs.py` — the block coder over
   the data blocks of an existing database, ratio and rate, and zlib and LZ4
   over the same blocks for comparison. See *Compression* above.
+* `tools/lookup_probe` — resident lookups on an existing database, by thread
+  count and by working set, with the allocations each lookup makes counted.
+  See *The read path* above.
 * `tools/bench` — throughput and latency for sequential and random workloads,
   with and without `sync`, reported as percentiles because an average hides
   what compaction does to the tail. It reports three amplifications and

@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -37,6 +38,25 @@ void walk(std::string_view bytes, const ambar::Comparator* comparator,
   if (iter->valid()) {
     (void)iter->key();
     (void)iter->value();
+  }
+
+  // Block::find is a second parser of the same bytes, the one every point
+  // lookup goes through, and it must agree with the iterator's seek on
+  // every block the fuzzer can make: found where seek is valid, with the
+  // same key and value, and refused where seek reports damage.
+  {
+    std::string key;
+    std::string_view value;
+    ambar::Status status;
+    const bool found = block.find(comparator, target, &key, &value, &status);
+    iter->seek(target);
+    if (found != iter->valid()) std::abort();
+    if (found && (key != iter->key() || value != iter->value())) std::abort();
+    if (status.is_ok() != iter->status().is_ok()) std::abort();
+  }
+
+  iter->seek(target);
+  if (iter->valid()) {
     iter->next();
     if (iter->valid()) iter->prev();
   }

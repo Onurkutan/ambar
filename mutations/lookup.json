@@ -1,0 +1,23 @@
+{
+  "_comment": "The point-lookup path after its allocations were removed: Block::find, which is a second implementation of the iterator's seek and so must agree with it and refuse what it refuses, and the level-0 search, which finds the newest file not yet searched on each pass and must take them newest first. tests/test_block.cpp holds find against seek on every target and on damaged blocks; tests/test_db.cpp reads a key with three versions in three level-0 files, at each snapshot.",
+  "find: land on the entry before the target": [
+    "src/block.cpp",
+    "    if (comparator->compare(*key, target) >= 0) {",
+    "    if (comparator->compare(*key, target) > 0) {"
+  ],
+  "find: trust a shared prefix longer than the previous key": [
+    "src/block.cpp",
+    "    if (shared > key->size()) {\n      return corrupted(\"shared prefix longer than the previous key\");\n    }\n    key->resize(shared);",
+    "    key->resize(shared);"
+  ],
+  "find: accept a restart key too short for the comparator": [
+    "src/block.cpp",
+    "    if (non_shared < comparator->min_key_length) {\n      return corrupted(\"restart key is too short for this comparator\");\n    }\n    if (comparator->compare(std::string_view(key_ptr, non_shared), target) <",
+    "    if (comparator->compare(std::string_view(key_ptr, non_shared), target) <"
+  ],
+  "level 0: search the oldest file first": [
+    "src/version_set.cpp",
+    "                                        file->number > next->number) &&",
+    "                                        file->number < next->number) &&"
+  ]
+}

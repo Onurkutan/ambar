@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdint>
 #include <cstdio>
 
 #include "filename.hpp"
@@ -251,84 +252,97 @@ void save_value(void* arg, std::string_view key, std::string_view value) {
 
 }  // namespace
 
-Status Version::get(const ReadOptions& options, std::string_view user_key,
-                    SequenceNumber snapshot, std::string* value,
-                    GetStats* stats) {
+Status Version::get(const ReadOptions& options, const LookupKey& key,
+                    std::string* value, GetStats* stats) {
   stats->seek_file = nullptr;
   stats->seek_file_level = -1;
 
-  const std::string lookup = make_lookup_key(user_key, snapshot);
+  const std::string_view user_key = key.user_key();
+  const std::string_view lookup = key.internal_key();
   FileMetaData* last_file_read = nullptr;
   int last_file_read_level = -1;
 
-  std::vector<FileMetaData*> candidates;
-  for (int level = 0; level < kNumLevels; ++level) {
-    candidates.clear();
-
-    if (level == 0) {
-      // Overlapping files, so collect every one whose range covers the key and
-      // search them newest first -- the newest write wins, and stopping at the
-      // first answer is only correct in that order.
-      for (FileMetaData* file : files_[0]) {
-        if (vset_->user_comparator_->compare(
-                user_key, extract_user_key(file->smallest)) >= 0 &&
-            vset_->user_comparator_->compare(
-                user_key, extract_user_key(file->largest)) <= 0) {
-          candidates.push_back(file);
-        }
-      }
-      if (candidates.empty()) continue;
-      std::sort(candidates.begin(), candidates.end(),
-                [](const FileMetaData* a, const FileMetaData* b) {
-                  return a->number > b->number;  // newest first
-                });
-    } else {
-      if (files_[level].empty()) continue;
-      const size_t index = find_file(vset_->comparator_, files_[level], lookup);
-      if (index >= files_[level].size()) continue;
-      FileMetaData* file = files_[level][index];
-      // find_file only guarantees largest >= key; the key may still fall in
-      // the gap before this file.
-      if (vset_->user_comparator_->compare(
-              user_key, extract_user_key(file->smallest)) < 0) {
-        continue;
-      }
-      candidates.push_back(file);
+  // Searches one file; true when it settled the lookup, with *result set.
+  const auto search = [&](FileMetaData* file, int level, Status* result) {
+    // The first file searched without success is charged, not the last: it
+    // is the shallowest one, and compacting it is what removes the wasted
+    // read from every future lookup of this key.
+    if (last_file_read != nullptr && stats->seek_file == nullptr) {
+      stats->seek_file = last_file_read;
+      stats->seek_file_level = last_file_read_level;
     }
+    last_file_read = file;
+    last_file_read_level = level;
 
-    for (FileMetaData* file : candidates) {
-      // The first file searched without success is charged, not the last: it
-      // is the shallowest one, and compacting it is what removes the wasted
-      // read from every future lookup of this key.
-      if (last_file_read != nullptr && stats->seek_file == nullptr) {
-        stats->seek_file = last_file_read;
-        stats->seek_file_level = last_file_read_level;
-      }
-      last_file_read = file;
-      last_file_read_level = level;
+    Saver saver;
+    saver.comparator = vset_->comparator_;
+    saver.user_key = user_key;
+    saver.value = value;
 
-      Saver saver;
-      saver.comparator = vset_->comparator_;
-      saver.user_key = user_key;
-      saver.value = value;
+    *result = vset_->table_cache_->get(options, file->number, file->file_size,
+                                       lookup, &saver, save_value);
+    if (!result->is_ok()) return true;
 
-      const Status status = vset_->table_cache_->get(
-          options, file->number, file->file_size, lookup, &saver, save_value);
-      if (!status.is_ok()) return status;
+    switch (saver.state) {
+      case Saver::State::kNotFound:
+        return false;  // keep looking, in this level and then deeper
+      case Saver::State::kFound:
+        *result = Status::ok();
+        return true;
+      case Saver::State::kDeleted:
+        // A tombstone is a definitive answer: it shadows every older version
+        // in every deeper level, and continuing would resurrect one.
+        *result = Status::not_found("deleted");
+        return true;
+      case Saver::State::kCorrupt:
+        *result = Status::corruption("table entry has a malformed internal key");
+        return true;
+    }
+    return false;
+  };
+  const auto covers = [&](const FileMetaData* file) {
+    return vset_->user_comparator_->compare(
+               user_key, extract_user_key(file->smallest)) >= 0 &&
+           vset_->user_comparator_->compare(
+               user_key, extract_user_key(file->largest)) <= 0;
+  };
 
-      switch (saver.state) {
-        case Saver::State::kNotFound:
-          break;  // keep looking, in this level and then deeper
-        case Saver::State::kFound:
-          return Status::ok();
-        case Saver::State::kDeleted:
-          // A tombstone is a definitive answer: it shadows every older version
-          // in every deeper level, and continuing would resurrect one.
-          return Status::not_found("deleted");
-        case Saver::State::kCorrupt:
-          return Status::corruption("table entry has a malformed internal key");
+  Status status;
+
+  // Level 0: overlapping files, searched newest first -- the newest write
+  // wins, and stopping at the first answer is only correct in that order.
+  // The newest not yet searched is found by a pass over the level each
+  // time rather than by sorting a list of candidates: the level holds a
+  // handful of files, and the list cost a heap allocation per lookup.
+  uint64_t newer_than = UINT64_MAX;  // the number of the file searched last
+  while (true) {
+    FileMetaData* next = nullptr;
+    for (FileMetaData* file : files_[0]) {
+      if (file->number < newer_than && (next == nullptr ||
+                                        file->number > next->number) &&
+          covers(file)) {
+        next = file;
       }
     }
+    if (next == nullptr) break;
+    if (search(next, 0, &status)) return status;
+    newer_than = next->number;
+  }
+
+  // Deeper levels are disjoint: one file can hold the key, found by binary
+  // search on the files' largest keys.
+  for (int level = 1; level < kNumLevels; ++level) {
+    if (files_[level].empty()) continue;
+    const size_t index = find_file(vset_->comparator_, files_[level], lookup);
+    if (index >= files_[level].size()) continue;
+    FileMetaData* file = files_[level][index];
+    // find_file only guarantees largest >= key; the key may still fall in
+    // the gap before this file.
+    if (vset_->user_comparator_->compare(
+            user_key, extract_user_key(file->smallest)) < 0) {
+      continue;
+    }
+    if (search(file, level, &status)) return status;
   }
   return Status::not_found("not present");
 }

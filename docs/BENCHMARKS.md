@@ -102,14 +102,14 @@ range check lets them through and the filter is what turns them away.
 
 | | present keys | absent keys |
 |---|---|---|
-| ambar, this machine | 64,000 op/s (p50 14.7 µs) | **774,000 op/s** (p50 1.0 µs) |
+| ambar, this machine | 82,500 op/s (p50 12.4 µs) | **1,244,000 op/s** (p50 0.7 µs) |
 
-An absent key is answered twelve times faster than a present one, at the
+An absent key is answered fifteen times faster than a present one, at the
 cost of a memory probe, which is the win the filter buys. Both figures are
-from one run on the Windows machine of the amplification sections below,
-because the
-Linux figures above were made with the old keys, and so was the SQLite
-comparison. SQLite's absent-key rate has not been re-measured;
+medians of three runs on the Windows machine of the amplification sections
+below, with the lookup path as *Read scaling* below leaves it; they were
+64,000 and 774,000 before that path lost its allocations. The Linux figures
+above were made with the old keys, and so was the SQLite comparison. SQLite's absent-key rate has not been re-measured;
 the SQLite side of the benchmark now draws the same in-range keys, so the
 next comparison will be like for like. With the filter an absent key costs
 0.01 table reads per lookup against 0.93 for a present one — the false
@@ -263,10 +263,10 @@ two sections above, which has twelve cores.
 
 | threads | cache as given (8 MB) | | whole database resident | |
 |---|---|---|---|---|
-| 1 | 59,000 read/s | ×1.00 | 350,000 read/s | ×1.00 |
-| 2 | 118,000 | ×1.99 | 549,000 | ×1.57 |
-| 4 | 207,000 | ×3.49 | 954,000 | ×2.73 |
-| 8 | 315,000 | ×5.32 | 1,333,000 | ×3.81 |
+| 1 | 80,200 read/s | ×1.00 | 508,000 read/s | ×1.00 |
+| 2 | 149,400 | ×1.86 | 854,000 | ×1.68 |
+| 4 | 259,800 | ×3.24 | 1,478,000 | ×2.91 |
+| 8 | 394,600 | ×4.92 | 2,082,000 | ×4.10 |
 
 Two columns because they measure different things. With the cache as given,
 nine lookups in ten read a block from the file, and the operating system's
@@ -295,16 +295,46 @@ libstdc++ both, whose small-string buffers hold fifteen. The table is keyed
 by the sixty-four-bit hash now and a lookup allocates nothing, and the
 eight-thread rate did not move: 1,420,000 on an idle machine, at the top
 of the 1,270,000 to 1,410,000 the previous form had produced and inside
-its noise. The allocation was real and was not the bottleneck. What remains is the shard lock itself and the memtable
-probe, and neither has been measured on its own.
+its noise. The allocation was real and was not the bottleneck.
 
-The eight-thread rate is the steadier of the two figures. Across five runs it
-stayed between 1,270,000 and 1,410,000, while the single-thread rate moved
-between 300,000 and 390,000 depending on what else the machine was doing, so
-the ratio on the last row read anywhere from 3.8× to 4.5× for what was the
-same engine. A ratio with a noisy denominator is a poor headline; the rates
-are what the changes were judged by, and as everywhere in this document they
-belong to this machine.
+What was is the reason the table above reads 508,000 and 2,082,000 where it
+read 350,000 and 1,333,000. The remaining suspects were measured by
+removal: `ambar_lookup_probe` runs resident lookups on the benchmark
+database, and a scratch build had one suspect at a time taken out — the
+database mutex at the top of `get`, the memtables' and the version's
+reference counts, the block cache's lock and its list moves — and each was
+worth a few percent at eight threads and nothing at one. Then the probe's
+allocator was swapped for a thread-local free list, and one thread ran a
+fifth faster on a wide working set and a third faster on a hot one: the
+lookup made nine heap allocations. Two copies of the lookup key, a list of
+candidate files at level 0, an iterator over the index block and one over
+the data block with the string each rebuilt its keys into, and the wrapper
+that held the data block's cache handle. It makes one now — the string the
+found key is rebuilt into — and on a quiet machine, before and after
+interleaved, a resident lookup on one thread went from 2.3 µs to 1.8 on the
+million keys and from 1.7 to 1.2 on a hot set of twenty thousand; eight
+threads from 1,690,000 to 2,110,000 on the wide set and from 1,630,000 to
+1,830,000 on the hot one. The lookups that miss the cache gained as much
+in proportion, 14.8 µs to 12.4 at the median and 64,000 to 82,500 a
+second, since a miss made the same nine allocations and then the read.
+
+The hot set is the one to watch. Its eight threads reach 2.1 times one
+where the wide set's reach 4.1, and neither the allocator nor any lock the
+probe took out on its own moves that: with every lookup in the same twenty
+thousand keys the threads share the same handful of blocks and the same two
+tables, and what they contend for is the table cache's shard lock, taken
+twice per lookup, and the reference counts on the version and the table,
+which every lookup writes. That is the next measurement.
+
+The eight-thread rate is the steadier of the two figures. Across five runs
+of the previous form it stayed between 1,270,000 and 1,410,000, while the
+single-thread rate moved between 300,000 and 390,000 depending on what
+else the machine was doing, so the ratio on the last row read anywhere
+from 3.8× to 4.5× for what was the same engine. A ratio with a noisy
+denominator is a poor headline; the rates are what the changes were judged
+by, and as everywhere in this document they belong to this machine. The
+table above is the median of three runs on a quiet evening; the resident
+rows agreed within 4 % and the cache-as-given rows within 6 %.
 
 ## Write scaling
 
@@ -576,7 +606,18 @@ across the three off runs, 4 % on, and 5 % now; the scan by 2 %, 3 % and
 writes. The coder's decoding rate is the figure that moves most with the
 machine's state: 1,606 to 1,653 MB/s across the three runs behind the
 table, and 1,512 to 1,545 an hour later on the same binary and blocks.
-Reproduce with:
+
+The tables above were taken before the lookup path lost its allocations
+(*Read scaling* above), which lifted every read row in both columns. With
+that path, medians of three runs on a quiet evening, compression off and
+on: a cache-missing lookup 82,500 and 93,100 a second (p50 12.4 and
+10.7 µs), an absent key 1,244,000 and 1,199,000, the cold scan 2,328,000
+and 2,667,000, random writes 72,200 and 90,700; on disk, write
+amplification and the bytes per miss as in the table. The shape holds
+wherever a block is read: on is faster than off. With everything resident
+one thread read 508,000 with compression off and 456,000 with it on, a
+gap of a tenth that the earlier session did not show and that these runs
+do not explain, since nothing resident is decoded. Reproduce with:
 
     ./build/ambar_bench /tmp/bench --keys 1000000 --value-size 100 --compression lz
     ./build/ambar_codec_bench /tmp/bench/ambar --dump blocks.bin

@@ -97,8 +97,8 @@ class Version {
     int seek_file_level = -1;
   };
 
-  Status get(const ReadOptions& options, std::string_view user_key,
-             SequenceNumber snapshot, std::string* value, GetStats* stats);
+  Status get(const ReadOptions& options, const LookupKey& key,
+             std::string* value, GetStats* stats);
 
   // Returns true when the charge suggests a compaction is now worth starting.
   bool update_stats(const GetStats& stats);

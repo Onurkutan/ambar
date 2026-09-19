@@ -33,6 +33,7 @@
 
 #include "testutil.hpp"
 
+#include "../include/ambar/cache.hpp"
 #include "../include/ambar/db.hpp"
 #include "../include/ambar/filter_policy.hpp"
 
@@ -358,6 +359,89 @@ TEST(db, survives_many_small_sessions) {
       }
     }
   }
+}
+
+// Two versions of one key in two level-0 files, which overlap: a lookup
+// must search the newer file first, and a snapshot older than the second
+// write must be answered by the older file.  Level 0 is searched without
+// sorting the candidates into a list, by finding the newest not yet
+// searched on each pass; this is the order that pass has to produce.
+TEST(db, a_lookup_across_level_zero_files_takes_the_newest_first) {
+  TempDir dir;
+  Options options = test_options();
+  options.write_buffer_size = 64 << 10;  // the smallest the engine allows
+  std::unique_ptr<DB> db;
+  CHECK_OK(DB::open(options, dir.file("db"), &db));
+
+  // A write, then enough filler to flush the memtable that holds it; five
+  // times.  A flushed table that overlaps nothing is placed below level 0,
+  // and one that overlaps only a deep file is placed above that file, so
+  // the first two land at levels 2 and 1 and the three after them, each
+  // overlapping the one before at level 0, stay at level 0 -- below the
+  // four that would start a compaction.
+  const std::string filler(1000, 'f');
+  const Snapshot* snapshots[5];
+  for (int version = 0; version < 5; ++version) {
+    CHECK_OK(db->put(WriteOptions(), "target", "version " +
+                                                     std::to_string(version)));
+    snapshots[version] = db->get_snapshot();
+    for (int i = 0; i < 60; ++i) {
+      CHECK_OK(db->put(WriteOptions(), key_of(version * 1000 + i), filler));
+    }
+  }
+  std::string files;
+  CHECK(db->get_property("ambar.num-files-at-level0", &files));
+  const int level0 = std::atoi(files.c_str());
+  std::printf("    %d files at level 0\n", level0);
+  CHECK(level0 >= 2);
+
+  std::string value;
+  CHECK_OK(db->get(ReadOptions(), "target", &value));
+  CHECK_EQ(value, std::string("version 4"));
+  for (int version = 0; version < 5; ++version) {
+    ReadOptions at;
+    at.snapshot = snapshots[version];
+    CHECK_OK(db->get(at, "target", &value));
+    CHECK_EQ(value, "version " + std::to_string(version));
+    db->release_snapshot(snapshots[version]);
+  }
+}
+
+// A lookup that the block cache answers makes one heap allocation: the
+// string the key found in the block is rebuilt into.  It made nine before
+// this was counted -- two lookup keys, a list of candidate files, two
+// iterators and their keys, and the wrapper holding the cache handle --
+// and those nine were a fifth of what the lookup cost.
+TEST(db, a_cached_lookup_makes_one_allocation) {
+  TempDir dir;
+  Options options = test_options();
+  const auto cache = new_lru_cache(64 << 20);
+  options.block_cache = cache.get();
+  std::unique_ptr<DB> db;
+  CHECK_OK(DB::open(options, dir.file("db"), &db));
+  for (int i = 0; i < 3000; ++i) {
+    CHECK_OK(db->put(WriteOptions(), key_of(i), "value " + std::to_string(i)));
+  }
+  db->compact_range(nullptr, nullptr);  // one level, every block on disk
+
+  std::string value;
+  for (int i = 0; i < 3000; ++i) {  // warm: every block into the cache
+    CHECK_OK(db->get(ReadOptions(), key_of(i), &value));
+  }
+  const unsigned long long before = ambar::testing::thread_allocations();
+  for (int i = 0; i < 3000; ++i) {
+    CHECK_OK(db->get(ReadOptions(), key_of(i), &value));
+  }
+  const unsigned long long made = ambar::testing::thread_allocations() - before;
+  std::printf("    %.2f allocations per cached lookup\n",
+              static_cast<double>(made) / 3000.0);
+#if defined(_ITERATOR_DEBUG_LEVEL) && _ITERATOR_DEBUG_LEVEL > 0
+  // MSVC's checked containers allocate a proxy object for every string and
+  // vector they construct, which is a count of the debug library's making
+  // and not the engine's: printed, not held.
+#else
+  CHECK(made <= 3000);
+#endif
 }
 
 // --------------------------------------------------------- snapshots -------

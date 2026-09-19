@@ -214,6 +214,23 @@ since a writer answered while it watched returns without the mutex, a
 leader that touched one afterwards would read a dead stack frame, which
 the AddressSanitizer job now runs with the detection to catch.
 
+**Nine heap allocations in every lookup.** With the database resident, a
+point lookup took 2.5 µs, and a probe that removed one suspect at a time —
+the database mutex, the reference counts, the block cache's lock and its
+list moves — found each worth a few percent. Swapping the allocator for a
+thread-local free list found a fifth: the lookup made nine allocations, two
+copies of the lookup key, a list of candidate files, two iterators with
+their key strings, and the wrapper that held the block's cache handle. It
+now makes one. The key is built once in space of its own, level 0 is
+searched without a list, and a block is probed by a point lookup that does
+what the iterator's seek does without the iterator. On one thread a
+resident lookup went from 2.3 µs to 1.8 on a wide working set and from 1.7
+to 1.2 on a hot one, a fifth and a half faster; on eight threads a quarter
+and an eighth (`ambar_lookup_probe`, which counts the allocations too); and
+in the benchmark, where most lookups miss the cache, a lookup went from
+14.8 µs to 12.4 and one for an absent key from 1.0 to 0.7. The test binary
+counts allocations on its own thread and holds a cached lookup at one.
+
 **A decoder at a sixth of LZ4's speed, and a cost that turned into a
 gain.** The block coder was written here so that its decoder, a parser of
 untrusted bytes, would be bounded and fuzzed like every other; measured
@@ -257,7 +274,7 @@ engine, and the comment says what still is not.
     cmake --build build
     ./build/ambar_tests
 
-242 tests, no external framework. Also:
+248 tests, no external framework. Also:
 
     cmake -S . -B build-asan -DAMBAR_SANITIZE=address   # ASan + UBSan
     cmake -S . -B build-tsan -DAMBAR_SANITIZE=thread    # ThreadSanitizer
@@ -339,9 +356,11 @@ and with it held entirely in memory, where the engine's own locks are all
 that is left to measure; and synced writes on one to eight threads, beside
 the number of batches each `fsync` carried, which is what group commit is
 for. The same run with `--compression lz` is what compression costs and
-saves, and `ambar_codec_bench` with `tools/compare_codecs.py` puts the
-block coder beside zlib and LZ4 on the same blocks. See `docs/BENCHMARKS.md`
-for the numbers and what they do and do not show.
+saves; `ambar_codec_bench` with `tools/compare_codecs.py` puts the block
+coder beside zlib and LZ4 on the same blocks; and `ambar_lookup_probe` runs
+resident lookups on an existing database by thread count and working set,
+counting the allocations each makes. See `docs/BENCHMARKS.md` for the
+numbers and what they do and do not show.
 
 ## Documentation
 

@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <string_view>
 
 #include "ambar/iterator.hpp"
@@ -34,6 +35,16 @@ class Block {
   // decode, an error iterator is returned rather than a null pointer, so a
   // caller merging several blocks needs no special case.
   Iterator* new_iterator(const Comparator* comparator) const;
+
+  // A point lookup: the first entry whose key is at or after `target`.  What
+  // the iterator's seek does, without the iterator -- nothing on the heap,
+  // no position kept -- which is what a lookup wants from a block it will
+  // touch once.  The key is rebuilt into *key, since entries share prefixes
+  // and a key rarely exists whole in the block; *value is a view into the
+  // block.  Returns false with an ok *status past the last entry, and false
+  // with a corruption where the block does not parse.
+  bool find(const Comparator* comparator, std::string_view target,
+            std::string* key, std::string_view* value, Status* status) const;
 
  private:
   class Iter;

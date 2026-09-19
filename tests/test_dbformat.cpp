@@ -97,6 +97,33 @@ TEST(DbFormat, a_lookup_key_sorts_at_or_before_every_visible_entry) {
                               make_internal_key("k", 101, ValueType::kValue)) > 0);
 }
 
+TEST(DbFormat, a_lookup_key_holds_the_three_forms_a_lookup_needs) {
+  // The memtable's form is the internal key behind a varint32 of its
+  // length; the internal key is the user key and the tag; and each is a
+  // view into the one buffer, equal to what the string builders make.
+  const LookupKey key("apple", 42);
+  CHECK_EQ(std::string(key.user_key()), std::string("apple"));
+  CHECK_EQ(std::string(key.internal_key()), make_lookup_key("apple", 42));
+  std::string memtable_form;
+  put_varint32(&memtable_form, 13);
+  memtable_form += make_lookup_key("apple", 42);
+  CHECK_EQ(std::string(key.memtable_key()), memtable_form);
+  CHECK(key.internal_key().data() == key.user_key().data());
+  CHECK(key.memtable_key().data() + 1 == key.internal_key().data());
+
+  // Longer than the space inside the key: the same forms, from the heap.
+  const std::string big(5000, 'x');
+  const LookupKey long_key(big, 7);
+  CHECK_EQ(std::string(long_key.user_key()), big);
+  CHECK_EQ(std::string(long_key.internal_key()), make_lookup_key(big, 7));
+  CHECK_EQ(long_key.memtable_key().size(), size_t{2 + 5000 + 8});
+
+  // And an empty user key is a legal one.
+  const LookupKey empty("", 1);
+  CHECK_EQ(empty.user_key().size(), size_t{0});
+  CHECK_EQ(empty.internal_key().size(), size_t{8});
+}
+
 TEST(DbFormat, sorting_a_shuffled_set_gives_the_documented_order) {
   std::vector<std::string> keys = {
       make_internal_key("a", 1, ValueType::kValue),
