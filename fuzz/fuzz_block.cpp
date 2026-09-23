@@ -44,15 +44,27 @@ void walk(std::string_view bytes, const ambar::Comparator* comparator,
   // lookup goes through, and it must agree with the iterator's seek on
   // every block the fuzzer can make: found where seek is valid, with the
   // same key and value, and refused where seek reports damage.
+  //
+  // Against a *fresh* iterator, which is the whole of the claim.  An
+  // iterator's status is sticky -- once anything it did found damage it
+  // reports damage for the rest of its life -- so the scan above can have
+  // recorded a fault in the tail of a block that a find over the intact
+  // head is right not to report, and holding the two against each other
+  // compares a history with an answer.  The first version of this check
+  // reused the iterator and the fuzz job found the difference in three
+  // runs.
   {
+    std::unique_ptr<ambar::Iterator> fresh(block.new_iterator(comparator));
+    fresh->seek(target);
+
     std::string key;
     std::string_view value;
     ambar::Status status;
     const bool found = block.find(comparator, target, &key, &value, &status);
-    iter->seek(target);
-    if (found != iter->valid()) std::abort();
-    if (found && (key != iter->key() || value != iter->value())) std::abort();
-    if (status.is_ok() != iter->status().is_ok()) std::abort();
+
+    if (found != fresh->valid()) std::abort();
+    if (found && (key != fresh->key() || value != fresh->value())) std::abort();
+    if (status.is_ok() != fresh->status().is_ok()) std::abort();
   }
 
   iter->seek(target);

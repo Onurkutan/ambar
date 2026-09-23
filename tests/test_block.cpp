@@ -193,3 +193,72 @@ TEST(block, find_refuses_a_block_that_does_not_parse) {
     CHECK(status.to_string().find("restart key") == std::string::npos);
   }
 }
+
+TEST(block, damage_in_the_tail_is_seen_only_by_what_reaches_it) {
+  // Both parsers read lazily, so a block damaged near its end still
+  // answers a lookup that lands before the damage, and refuses one that
+  // has to walk into it -- find and a fresh iterator's seek alike.  What
+  // does see the damage early is an iterator that has already walked the
+  // whole block, and its status stays damaged for the rest of its life:
+  // the fuzz target's first comparison of find with seek reused such an
+  // iterator, and the fuzz job reported the difference as a disagreement.
+  const auto entries = shared_prefix_entries(40);
+  const std::string whole = build(entries, 16);
+
+  // The last entry starts where the entries of the first thirty-nine end,
+  // which is the restart array of a block built from those alone.
+  const std::vector<std::pair<std::string, std::string>> head(
+      entries.begin(), entries.end() - 1);
+  const std::string shorter = build(head, 16);
+  const uint32_t head_restarts =
+      decode_fixed32(shorter.data() + shorter.size() - 4);
+  const size_t last_entry = shorter.size() - 4 - head_restarts * 4;
+  CHECK_EQ(whole.substr(0, last_entry), shorter.substr(0, last_entry));
+
+  // Its third header byte is the value's length; claim more than the
+  // block holds.
+  std::string damaged = whole;
+  damaged[last_entry + 2] = 0x7f;
+  const Block block = over(damaged);
+
+  std::unique_ptr<Iterator> scan(block.new_iterator(bytewise_comparator()));
+  int scanned = 0;
+  for (scan->seek_to_first(); scan->valid(); scan->next()) ++scanned;
+  CHECK_EQ(scanned, 39);
+  CHECK(scan->status().is_corruption());
+
+  // Before the damage: found, by both, with nothing wrong reported.
+  {
+    const std::string& target = entries[5].first;
+    std::string key;
+    std::string_view value;
+    Status status;
+    CHECK(block.find(bytewise_comparator(), target, &key, &value, &status));
+    CHECK_OK(status);
+    CHECK_EQ(key, target);
+    CHECK_EQ(std::string(value), entries[5].second);
+
+    std::unique_ptr<Iterator> fresh(block.new_iterator(bytewise_comparator()));
+    fresh->seek(target);
+    CHECK(fresh->valid());
+    CHECK_OK(fresh->status());
+    // The scanned iterator lands on the same entry and still says damaged.
+    scan->seek(target);
+    CHECK(scan->valid());
+    CHECK(scan->status().is_corruption());
+  }
+  // Into the damage: refused, by both.
+  {
+    const std::string& target = entries.back().first;
+    std::string key;
+    std::string_view value;
+    Status status;
+    CHECK(!block.find(bytewise_comparator(), target, &key, &value, &status));
+    CHECK(status.is_corruption());
+
+    std::unique_ptr<Iterator> fresh(block.new_iterator(bytewise_comparator()));
+    fresh->seek(target);
+    CHECK(!fresh->valid());
+    CHECK(fresh->status().is_corruption());
+  }
+}
