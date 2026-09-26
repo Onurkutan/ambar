@@ -64,8 +64,8 @@ class TableBuilder {
 
  private:
   // Finishes `block` and writes it, compressed when `compressible` and the
-  // options ask for it and it pays -- a block that would not shrink is
-  // written as it is.  Data blocks are compressible; the index and
+  // options ask for it and it pays -- a block that would not shrink by an
+  // eighth is written as it is.  Data blocks are compressible; the index and
   // metaindex are not, being read once and held.
   void write_block(BlockBuilder* block, bool compressible, BlockHandle* handle);
   void write_raw_block(std::string_view contents, CompressionType type,

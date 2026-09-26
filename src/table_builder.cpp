@@ -95,10 +95,17 @@ void TableBuilder::write_block(BlockBuilder* block, bool compressible,
   if (compressible && options_.compression == Options::Compression::kLz) {
     compressed_.clear();
     compress_block(raw, &compressed_);
-    // Stored compressed only when that is smaller.  A block of bytes with
-    // no structure comes out a little larger than it went in, and would
-    // then cost a decode on every read to save nothing.
-    if (compressed_.size() < raw.size()) {
+    // Stored compressed only when that saves at least an eighth, the rule
+    // LevelDB uses.  A block that saves less is not worth what it costs:
+    // every read of it pays a decode for the few bytes saved.  The rule
+    // was "any saving" until values with no structure were measured, and
+    // their blocks came out two percent smaller -- the keys and the
+    // internal-key trailers compress, the values do not -- so every cache
+    // miss paid a decode for two percent, and those lookups ran a few
+    // percent behind compression off (docs/BENCHMARKS.md, "Where there is
+    // nothing to gain").  A block that would grow is stored raw by the
+    // same rule.
+    if (compressed_.size() < raw.size() - raw.size() / 8) {
       type = CompressionType::kLz;
       contents = compressed_;
     }

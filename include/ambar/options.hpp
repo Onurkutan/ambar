@@ -67,7 +67,8 @@ struct Options {
   // kLz is an LZ77 coder written for this engine (src/compress.hpp): on
   // keys and values with structure it makes a block a fraction of its size,
   // which is that fraction off every table written, compacted and read from
-  // disk; on data with none it stores the block as it was, so the cost of
+  // disk; on data with none it stores the block as it was -- any block
+  // that would not shrink by an eighth -- so the cost of
   // asking is a pass over the block at write time.  What it costs a read is
   // a decode per block the cache did not answer.  Off by default, so that
   // the figures in docs/BENCHMARKS.md describe the engine as configured; a

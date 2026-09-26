@@ -34,8 +34,9 @@
 // bound by how much of the data is cached, which is worth knowing before
 // choosing a cache size, and is invisible in a single measurement.
 //
-// Usage: bench <dir> [--keys N] [--value-size N] [--cache-mb N] [--threads N]
-//              [--write-buffer-mb N] [--compression none|lz] [--no-sqlite]
+// Usage: bench <dir> [--keys N] [--value-size N] [--values mixed|random]
+//              [--cache-mb N] [--threads N] [--write-buffer-mb N]
+//              [--compression none|lz] [--no-sqlite]
 
 #include <algorithm>
 #include <chrono>
@@ -68,6 +69,13 @@ struct Config {
   std::string dir;
   int keys = 500000;
   int value_size = 100;
+  // What the values are made of.  Mixed is half random and half repeated,
+  // which is what real values tend to look like and what the tables in
+  // docs/BENCHMARKS.md are measured on, but for the one that says it is
+  // not; random is bytes with no structure, which nothing compresses, and
+  // is the case that says what asking costs when there is nothing to gain.
+  enum class Values { kMixed, kRandom };
+  Values values = Values::kMixed;
   int cache_mb = 8;
   int threads = 8;  // the most the read-scaling phase runs at once
   // The memtable.  Four megabytes flushes every forty thousand writes and
@@ -99,12 +107,19 @@ std::string key_of(int n) {
 // own false-positive rate says 0.01.
 std::string absent_key_of(int n) { return key_of(n) + "-"; }
 
-std::string make_value(int n, int size, std::mt19937* rng) {
+std::string make_value(int n, int size, std::mt19937* rng,
+                       Config::Values kind) {
+  std::string out;
+  out.reserve(static_cast<size_t>(size));
+  if (kind == Config::Values::kRandom) {
+    for (int i = 0; i < size; ++i) {
+      out.push_back(static_cast<char>((*rng)() & 0xff));
+    }
+    return out;
+  }
   // Half random, half repeated: entirely random data makes compression
   // pointless and entirely repeated data makes it free.  Neither is what real
   // values look like.
-  std::string out;
-  out.reserve(static_cast<size_t>(size));
   out += "v" + std::to_string(n) + ":";
   while (static_cast<int>(out.size()) < size) {
     if ((*rng)() % 2 == 0) {
@@ -360,7 +375,8 @@ uint64_t write_scaling_row(DB* db, const Config& config, int threads,
       static_cast<size_t>(threads) * static_cast<size_t>(per_thread));
   uint64_t handed = 0;
   for (size_t i = 0; i < values.size(); ++i) {
-    values[i] = make_value(static_cast<int>(i), config.value_size, rng);
+    values[i] = make_value(static_cast<int>(i), config.value_size, rng,
+                           config.values);
     handed += values[i].size();
   }
 
@@ -499,7 +515,8 @@ void bench_ambar(const Config& config) {
     const auto start = Clock::now();
     for (int i = 0; i < config.keys; ++i) {
       const std::string key = key_of(i);
-      const std::string value = make_value(i, config.value_size, &rng);
+      const std::string value =
+          make_value(i, config.value_size, &rng, config.values);
       sizes.user_bytes += key.size() + value.size();
       sizes.handed_bytes += key.size() + value.size();
       const auto op = Clock::now();
@@ -520,7 +537,8 @@ void bench_ambar(const Config& config) {
     const auto start = Clock::now();
     for (const int i : order) {
       const std::string key = key_of(i);
-      const std::string value = make_value(i, config.value_size, &rng);
+      const std::string value =
+          make_value(i, config.value_size, &rng, config.values);
       sizes.handed_bytes += key.size() + value.size();
       const auto op = Clock::now();
       db->put(WriteOptions(), key, value);
@@ -540,7 +558,8 @@ void bench_ambar(const Config& config) {
     const auto start = Clock::now();
     for (int i = 0; i < count; ++i) {
       const std::string key = key_of(i);
-      const std::string value = make_value(i, config.value_size, &rng);
+      const std::string value =
+          make_value(i, config.value_size, &rng, config.values);
       sizes.handed_bytes += key.size() + value.size();
       const auto op = Clock::now();
       db->put(sync_options, key, value);
@@ -761,7 +780,8 @@ void bench_sqlite(const Config& config) {
     exec("BEGIN");
     for (int i = 0; i < config.keys; ++i) {
       const std::string key = key_of(i);
-      const std::string value = make_value(i, config.value_size, &rng);
+      const std::string value =
+          make_value(i, config.value_size, &rng, config.values);
       const auto op = Clock::now();
       sqlite3_bind_text(insert, 1, key.c_str(), -1, SQLITE_TRANSIENT);
       sqlite3_bind_blob(insert, 2, value.data(),
@@ -864,6 +884,14 @@ int main(int argc, char** argv) {
       config.keys = std::atoi(argv[++i]);
     } else if (arg == "--value-size" && i + 1 < argc) {
       config.value_size = std::atoi(argv[++i]);
+    } else if (arg == "--values" && i + 1 < argc) {
+      const std::string which = argv[++i];
+      if (which == "random") {
+        config.values = Config::Values::kRandom;
+      } else if (which != "mixed") {
+        std::fprintf(stderr, "--values takes mixed or random\n");
+        return 2;
+      }
     } else if (arg == "--cache-mb" && i + 1 < argc) {
       config.cache_mb = std::atoi(argv[++i]);
     } else if (arg == "--threads" && i + 1 < argc) {
@@ -888,10 +916,11 @@ int main(int argc, char** argv) {
   std::filesystem::create_directories(config.dir);
 
   std::printf("ambar benchmark\n");
-  std::printf("  %d keys, %d-byte values, %d MB block cache, %d MB memtable, "
-              "%.0f MB of user data, compression %s\n",
-              config.keys, config.value_size, config.cache_mb,
-              config.write_buffer_mb,
+  std::printf("  %d keys, %d-byte %s values, %d MB block cache, %d MB "
+              "memtable, %.0f MB of user data, compression %s\n",
+              config.keys, config.value_size,
+              config.values == Config::Values::kRandom ? "random" : "mixed",
+              config.cache_mb, config.write_buffer_mb,
               static_cast<double>(config.keys) *
                   static_cast<double>(config.value_size + 16) / 1048576.0,
               config.compression == Options::Compression::kLz ? "on" : "off");

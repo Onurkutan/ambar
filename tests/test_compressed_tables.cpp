@@ -5,10 +5,11 @@
 // with compression on reads back the same as one written with it off, by
 // lookup and by scan in both directions, and across a reopen and a
 // compaction; that the trailer byte records the choice per block, so a
-// block that did not shrink is stored raw and a database written with
-// compression on is read by a build with it off; that the index, metaindex
-// and filter are never compressed; that the block cache is charged the
-// decoded size; and that a compressed block that is damaged, or forged
+// block that did not shrink by an eighth is stored raw and a database
+// written with compression on is read by a build with it off; that the
+// index, metaindex and filter are never compressed; that the block cache
+// is charged the decoded size; and that a compressed block that is
+// damaged, or forged
 // with a valid checksum over a stream the decoder must refuse, or labelled
 // with a type this build does not know, is an error and not a crash.
 
@@ -24,6 +25,7 @@
 #include "ambar/db.hpp"
 #include "ambar/filter_policy.hpp"
 #include "block.hpp"
+#include "compress.hpp"
 #include "encoding.hpp"
 #include "comparator.hpp"
 #include "file.hpp"
@@ -235,11 +237,48 @@ TEST(compressed_tables, structured_data_shrinks_and_random_data_barely_does) {
               static_cast<unsigned long long>(random_off),
               static_cast<unsigned long long>(random_on));
   CHECK(structured_on < structured_off / 2);
-  // Random values: the keys still compress, the values do not, and the
-  // file is a little smaller -- never larger, since a block that would
-  // grow is stored as it was.
+  // Random values: the keys still compress, the values do not, and no
+  // block saves the eighth that is worth a decode on every read, so the
+  // tables are stored as they would have been without compression -- and
+  // never larger, since a block that would grow is stored as it was too.
   CHECK(random_on <= random_off);
   CHECK(random_on > random_off * 9 / 10);
+}
+
+TEST(compressed_tables, a_block_that_saves_less_than_an_eighth_is_stored_raw) {
+  // A database of random values: the keys and the internal-key trailers
+  // compress a little and the values not at all, so a block comes out a
+  // few percent smaller -- which is not worth a decode on every read of
+  // it.  The builder stores it raw.  The proof that the rule made that
+  // choice, and not the data, is that the block's own bytes, handed to
+  // the coder here, do come out smaller.
+  TempDir dir;
+  {
+    std::unique_ptr<DB> db;
+    CHECK_OK(DB::open(options_with(Options::Compression::kLz), dir.file("db"),
+                      &db));
+    for (int i = 0; i < 4000; ++i) {
+      CHECK_OK(db->put(WriteOptions(), key_of(i), random_value(i)));
+    }
+    db->compact_range(nullptr, nullptr);
+  }
+  const auto tables = tables_in(dir.file("db"));
+  CHECK(!tables.empty());
+  if (tables.empty()) return;
+  const std::string bytes = read_file(tables[0]);
+  const size_t block = first_block_length(bytes);
+  CHECK(block > 0);
+  if (block == 0) return;
+  CHECK_EQ(static_cast<int>(static_cast<unsigned char>(bytes[block])), 0);
+
+  std::string compressed;
+  compress_block(std::string_view(bytes.data(), block), &compressed);
+  std::printf("    first block: %zu bytes, %zu compressed, %.1f%% saved\n",
+              block, compressed.size(),
+              100.0 * (1.0 - static_cast<double>(compressed.size()) /
+                                 static_cast<double>(block)));
+  CHECK(compressed.size() < block);               // it would have shrunk,
+  CHECK(compressed.size() >= block - block / 8);  // by less than an eighth
 }
 
 TEST(compressed_tables, a_block_that_would_not_shrink_is_stored_raw) {

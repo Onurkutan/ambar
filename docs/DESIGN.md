@@ -571,10 +571,17 @@ rate. `docs/BENCHMARKS.md` puts the coders side by side and then measures
 the engine with compression on.
 
 The choice is recorded per block, not per file. The builder stores a block
-compressed only when that is smaller, and writes the trailer's type byte to
-say which it did, so a block of bytes with no structure costs no extra bytes
-and no decode, and a reader never has to know how a file was written: a build
-with compression off reads a file written with it on. The index, filter and
+compressed only when that saves at least an eighth of it, LevelDB's rule,
+and writes the trailer's type byte to say which it did, so a block with
+little structure costs no extra bytes and no decode, and a reader never has
+to know how a file was written: a build with compression off reads a file
+written with it on. The eighth was taken from LevelDB and kept because it
+measured well: the rule was "any saving" until values with no structure
+were benchmarked, and their blocks came out two percent smaller — the keys
+and the internal-key trailers compress, the values do not — so every cache
+miss paid a decode for two percent, and those lookups ran a few percent
+behind compression off. Under the eighth the blocks are stored raw and the
+lookups are level with it. The index, filter and
 metaindex are never compressed; they are read once per open and held, so
 there is nothing to save. The block cache holds decoded blocks and is charged
 their decoded size, so `Options::block_cache` bounds memory, as it says, and
@@ -890,6 +897,18 @@ which file it sits in.
 Stated so that the absence is a decision rather than an omission a reader has
 to discover.
 
+* **Noticing that a file is not compressing.** The builder asks the coder
+  about every data block and stores the block raw when it did not save an
+  eighth, so neither the disk nor a read loses by asking — but the writer
+  does: the coder runs on every block whatever it decides, and on values
+  with no structure that is nine percent of the random-write rate, spent
+  by the compaction thread for nothing while writers wait for it
+  (`docs/BENCHMARKS.md`, *Where there is nothing to gain*). One answer is
+  to sample: compress some of a file's blocks, and if none of them saves
+  the eighth, stop asking for the rest of the file. Not done, because it
+  is a heuristic with its own failure mode — a file whose first blocks are
+  images and whose last are text — and the engine has no measurement of
+  how often that shape occurs.
 * **A better compressor.** The coder in `src/compress.hpp` takes the first
   match its hash table offers and stops there; LZ4's high-compression
   level tries more candidates for each match and zlib adds an entropy

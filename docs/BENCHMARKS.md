@@ -615,13 +615,76 @@ on: a cache-missing lookup 82,500 and 93,100 a second (p50 12.4 and
 and 2,667,000, random writes 72,200 and 90,700; on disk, write
 amplification and the bytes per miss as in the table. The shape holds
 wherever a block is read: on is faster than off. With everything resident
-one thread read 508,000 with compression off and 456,000 with it on, a
-gap of a tenth that the earlier session did not show and that these runs
-do not explain, since nothing resident is decoded. Reproduce with:
+one thread read 508,000 with compression off and 456,000 with it on, a gap
+of a tenth that nothing in the engine accounts for, since nothing resident
+is decoded; interleaved runs a week later, below, put the two level —
+522,000 and 521,000 — and it was the machine. The same interleaved runs,
+off and on: 80,400 and 100,200 cache-missing lookups a second (p50 12.3
+and 9.5 µs), 60,200 and 90,000 random writes, and a cold scan 2,418,000
+and 2,786,000. Reproduce with:
 
     ./build/ambar_bench /tmp/bench --keys 1000000 --value-size 100 --compression lz
     ./build/ambar_codec_bench /tmp/bench/ambar --dump blocks.bin
     python3 tools/compare_codecs.py blocks.bin      # pip install lz4, optionally
+
+### Where there is nothing to gain
+
+The values above are half random and half repeated, which is what real
+values tend to look like. This is the other end: `--values random`, a
+hundred bytes of random data each, which no coder can shrink. The keys and
+the internal-key trailers still compress, so a block is not quite
+incompressible: it comes out two percent smaller. The question is what
+asking costs when the answer is that.
+
+It was first measured with the builder keeping any saving, and those runs
+found reads a few percent slower with compression on: every block had
+shrunk by its two percent, so every lookup that missed the cache paid a
+decode for it. The builder now keeps a compressed block only when it saves
+at least an eighth, which is LevelDB's rule, and the table has both. The
+three columns were run interleaved — off, then on with the old rule, then
+on with the new, three times over — because a machine's state drifts over
+an evening by more than the differences here, and the first attempt at
+these numbers, run one column at a time, had put the write cost at twice
+what it is. The machine was idle before every run. The first and third
+columns are the same binary with a different option; the middle one is a
+separate build of the previous commit, which matters below.
+
+| | off | on, any saving kept | on, an eighth or more |
+|---|---|---|---|
+| on disk, after compaction | 110.8 MB | 108.2 MB | 110.8 MB |
+| write amplification | 5.21 (1,590 MB) | 5.03 (1,536 MB) | 5.09 (1,554 MB) |
+| write sequential, no sync | 136,900 op/s | 138,100 op/s | 133,000 op/s |
+| write random, no sync | 59,500 op/s | 54,600 op/s | **54,000 op/s** |
+| read random, present, 8 MB cache | 79,900 op/s (p50 12.3 µs) | 76,500 op/s (p50 12.9 µs) | **79,400 op/s** (p50 12.3 µs) |
+| — the same, freshly opened, 8 MB | 80,400 | 76,100 | 79,900 |
+| — the same, freshly opened, 256 MB | 258,100 | 242,600 | 257,400 |
+| eight threads, 8 MB cache | 386,900 read/s | 370,000 read/s | 388,200 read/s |
+| eight threads, everything resident | 2,143,000 read/s | 2,023,000 read/s | 2,128,000 read/s |
+
+Under the eighth the random blocks are stored raw — the directory is the
+size it is with compression off, a lookup reads the same 3.8 KB — so a
+lookup reads and decodes exactly what it does with compression off, and
+every read row is level with that column: the same binary, within a
+percent. Under the old rule the read rows were four to six percent behind,
+which is about what decoding a block of nearly all literals should cost,
+half a microsecond on the median lookup; but the resident row, which
+decodes nothing, is as far behind in that column, so some of that gap may
+be the separate build rather than the rule. What the eighth demonstrably
+does is take the decode out, and what is left is the write row. The coder runs on every block
+whatever it decides — about 1.5 GB of blocks at 390 MB/s, four seconds of
+a core on the thread that compacts, which is what random writes wait for —
+and random writes are nine percent slower for it, off and on measured by
+the one binary. The sequential row did
+not move within its spread, which was the widest in the table. A cold scan
+is not in the table: its three runs spread by twelve to fifteen percent in
+each column, more than any difference between them.
+
+So on data with no structure, compression on costs a tenth of the random
+write rate and nothing else, and on data with structure it saves two thirds
+of the space and is faster at everything. The engine does not try to
+notice that a *file* is not compressing and stop asking, which is what
+would take back that tenth; `docs/DESIGN.md` lists that under what is not
+implemented.
 
 ## What is not measured
 

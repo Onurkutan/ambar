@@ -12,8 +12,13 @@
   ],
   "builder: keep the compressed block only when it is larger": [
     "src/table_builder.cpp",
-    "    if (compressed_.size() < raw.size()) {",
-    "    if (compressed_.size() > raw.size()) {"
+    "    if (compressed_.size() < raw.size() - raw.size() / 8) {",
+    "    if (compressed_.size() > raw.size() - raw.size() / 8) {"
+  ],
+  "builder: keep the compressed block whenever it is smaller at all": [
+    "src/table_builder.cpp",
+    "    if (compressed_.size() < raw.size() - raw.size() / 8) {",
+    "    if (compressed_.size() < raw.size()) {"
   ],
   "builder: write the compressed bytes under the raw type": [
     "src/table_builder.cpp",
