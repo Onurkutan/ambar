@@ -125,56 +125,76 @@ unsigned long long ull(uint64_t n) {
 }  // namespace
 
 TEST(stats, counts_every_byte_the_disk_saw) {
-  Disk disk;
-  std::unique_ptr<DB> db;
-  CHECK_OK(DB::open(small_options(), "sim/db", &db));
+  // Twice: with the tables raw, and compressed as they are by default.
+  // Compressed bytes are counted like any others -- the counts are of what
+  // reached a file -- but there are fewer of them, which the sanity check
+  // on the totals has to know about.
+  uint64_t raw_table_bytes = 0;
+  for (const auto compression :
+       {Options::Compression::kNone, Options::Compression::kLz}) {
+    const bool compressed = compression == Options::Compression::kLz;
+    Disk disk;
+    Options options = small_options();
+    options.compression = compression;
+    std::unique_ptr<DB> db;
+    CHECK_OK(DB::open(options, "sim/db", &db));
 
-  // Enough keys to flush many times and compact several; then half of
-  // them again, so a compaction has versions to drop; then the whole tree
-  // swept, so nothing is left in motion when the counts are compared.
-  uint64_t handed = put_keys(db.get(), 0, 4000);
-  for (int i = 0; i < 4000; i += 2) {
-    const std::string key = key_of(i);
-    const std::string value = value_of(i + 1);
-    CHECK_OK(db->put(WriteOptions(), key, value));
-    handed += key.size() + value.size();
+    // Enough keys to flush many times and compact several; then half of
+    // them again, so a compaction has versions to drop; then the whole
+    // tree swept, so nothing is left in motion when the counts are
+    // compared.
+    uint64_t handed = put_keys(db.get(), 0, 4000);
+    for (int i = 0; i < 4000; i += 2) {
+      const std::string key = key_of(i);
+      const std::string value = value_of(i + 1);
+      CHECK_OK(db->put(WriteOptions(), key, value));
+      handed += key.size() + value.size();
+    }
+    db->compact_range(nullptr, nullptr);
+
+    const auto engine = bytes_written(db.get());
+    const SimFileSystem& fs = disk.fs;
+
+    // The workload has to have reached every writer being counted.  Sizes
+    // that kept everything in one memtable would pass with nothing checked.
+    CHECK(fs.count("create .sst") >= 8);
+    CHECK(at(engine, "flush") > 0);
+    CHECK(at(engine, "compaction") > 0);
+    CHECK(at(engine, "manifest") > 0);
+
+    // Every byte, of every kind, by both counts.
+    CHECK_EQ(at(engine, "log"), fs.bytes_appended(".log"));
+    CHECK_EQ(at(engine, "flush") + at(engine, "compaction"),
+             fs.bytes_appended(".sst"));
+    CHECK_EQ(at(engine, "manifest"), fs.bytes_appended("MANIFEST"));
+
+    const uint64_t tables = at(engine, "flush") + at(engine, "compaction");
+    const uint64_t total = at(engine, "log") + tables + at(engine, "manifest");
+    // The log alone holds everything handed in, plus headers, compressed
+    // or not: records are never compressed.  Raw, the tables hold it all
+    // again at least once; compressed, they hold it in fewer bytes than
+    // that -- these values compress -- and in more than none.
+    CHECK(at(engine, "log") > handed);
+    if (!compressed) {
+      CHECK(total > 2 * handed);
+      raw_table_bytes = tables;
+    } else {
+      CHECK(tables < raw_table_bytes);
+    }
+    std::printf("    %s: write amplification %.2f, %llu bytes written for "
+                "%llu handed in (log %llu, flush %llu, compaction %llu, "
+                "manifest %llu)\n",
+                compressed ? "compressed" : "raw",
+                static_cast<double>(total) / static_cast<double>(handed),
+                ull(total), ull(handed), ull(at(engine, "log")),
+                ull(at(engine, "flush")), ull(at(engine, "compaction")),
+                ull(at(engine, "manifest")));
+
+    // The human-readable form carries the same totals.
+    std::string stats;
+    CHECK(db->get_property("ambar.stats", &stats));
+    CHECK(stats.find("written since open: log") != std::string::npos);
   }
-  db->compact_range(nullptr, nullptr);
-
-  const auto engine = bytes_written(db.get());
-  const SimFileSystem& fs = disk.fs;
-
-  // The workload has to have reached every writer being counted.  Sizes
-  // that kept everything in one memtable would pass with nothing checked.
-  CHECK(fs.count("create .sst") >= 8);
-  CHECK(at(engine, "flush") > 0);
-  CHECK(at(engine, "compaction") > 0);
-  CHECK(at(engine, "manifest") > 0);
-
-  // Every byte, of every kind, by both counts.
-  CHECK_EQ(at(engine, "log"), fs.bytes_appended(".log"));
-  CHECK_EQ(at(engine, "flush") + at(engine, "compaction"),
-           fs.bytes_appended(".sst"));
-  CHECK_EQ(at(engine, "manifest"), fs.bytes_appended("MANIFEST"));
-
-  const uint64_t total = at(engine, "log") + at(engine, "flush") +
-                         at(engine, "compaction") + at(engine, "manifest");
-  // The log alone holds everything handed in, plus headers; the tables
-  // hold it again at least once.
-  CHECK(at(engine, "log") > handed);
-  CHECK(total > 2 * handed);
-  std::printf("    write amplification %.2f: %llu bytes written for %llu "
-              "handed in (log %llu, flush %llu, compaction %llu, manifest "
-              "%llu)\n",
-              static_cast<double>(total) / static_cast<double>(handed),
-              ull(total), ull(handed), ull(at(engine, "log")),
-              ull(at(engine, "flush")), ull(at(engine, "compaction")),
-              ull(at(engine, "manifest")));
-
-  // The human-readable form carries the same totals.
-  std::string stats;
-  CHECK(db->get_property("ambar.stats", &stats));
-  CHECK(stats.find("written since open: log") != std::string::npos);
 }
 
 // The log writer's count is of what reached the file, not of what it was

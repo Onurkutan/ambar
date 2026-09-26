@@ -54,11 +54,13 @@ std::string value_of(int i) {
                      static_cast<char>('a' + i % 26));
 }
 
-Options small_buffers() {
+Options small_buffers(Options::Compression compression =
+                          Options().compression) {
   Options options;
   options.create_if_missing = true;
   options.write_buffer_size = 64 << 10;  // several flushes, real compactions
   options.max_file_size = 1 << 20;       // and more than one output table
+  options.compression = compression;
   return options;
 }
 
@@ -66,10 +68,11 @@ Options small_buffers() {
 // in tables, then writes a final tail with sync so the log holds something
 // recovery has to replay.  Closes the database.  The model is what a reader
 // should see afterwards.
-Model build(const std::string& path, int keys) {
+Model build(const std::string& path, int keys,
+            Options::Compression compression = Options().compression) {
   Model model;
   std::unique_ptr<DB> db;
-  CHECK_OK(DB::open(small_buffers(), path, &db));
+  CHECK_OK(DB::open(small_buffers(compression), path, &db));
 
   for (int i = 0; i < keys; ++i) {
     CHECK_OK(db->put(WriteOptions(), key_of(i), value_of(i)));
@@ -262,8 +265,12 @@ TEST(repair, repairs_a_manifest_damaged_in_the_middle) {
 TEST(repair, sets_aside_a_table_that_will_not_read_and_keeps_the_rest) {
   TempDir dir;
   const std::string path = dir.file("db");
-  const int keys = 5000;  // over a megabyte of values: at least two tables
-  const Model model = build(path, keys);
+  // Over a megabyte of values, raw: at least two tables.  Raw because the
+  // count is in raw bytes -- these values are runs of one letter, and
+  // compressed, as the other tests here write them, they fit one table
+  // and there would be nothing left to keep.
+  const int keys = 5000;
+  const Model model = build(path, keys, Options::Compression::kNone);
 
   const std::vector<std::string> tables = files_of_type(path, FileType::kTable);
   CHECK(tables.size() >= 2);

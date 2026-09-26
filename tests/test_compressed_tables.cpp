@@ -558,3 +558,30 @@ TEST(compressed_tables, a_damaged_compressed_block_is_an_error) {
   }
   write_file(tables[0], original);
 }
+
+TEST(compressed_tables, blocks_are_compressed_unless_asked_otherwise) {
+  // The default is part of what docs/DESIGN.md and the options header
+  // promise, and what the benchmark tables are labelled by: a database
+  // opened with default options writes compressed data blocks.  Changing
+  // the default is changing all three, and this is what says so.
+  CHECK(Options().compression == Options::Compression::kLz);
+  TempDir dir;
+  {
+    Options options;
+    options.create_if_missing = true;
+    std::unique_ptr<DB> db;
+    CHECK_OK(DB::open(options, dir.file("db"), &db));
+    for (int i = 0; i < 2000; ++i) {
+      CHECK_OK(db->put(WriteOptions(), key_of(i), structured_value(i)));
+    }
+    db->compact_range(nullptr, nullptr);
+  }
+  const auto tables = tables_in(dir.file("db"));
+  CHECK(!tables.empty());
+  if (tables.empty()) return;
+  const std::string bytes = read_file(tables[0]);
+  const size_t block = first_block_length(bytes);
+  CHECK(block > 0);
+  if (block == 0) return;
+  CHECK_EQ(static_cast<int>(static_cast<unsigned char>(bytes[block])), 1);
+}

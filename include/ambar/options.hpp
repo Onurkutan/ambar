@@ -65,19 +65,24 @@ struct Options {
   // Whether data blocks are compressed on the way to disk.
   //
   // kLz is an LZ77 coder written for this engine (src/compress.hpp): on
-  // keys and values with structure it makes a block a fraction of its size,
-  // which is that fraction off every table written, compacted and read from
-  // disk; on data with none it stores the block as it was -- any block
-  // that would not shrink by an eighth -- so the cost of
-  // asking is a pass over the block at write time.  What it costs a read is
-  // a decode per block the cache did not answer.  Off by default, so that
-  // the figures in docs/BENCHMARKS.md describe the engine as configured; a
-  // database written with it on is read by any build that has it, with it
-  // on or off, since the choice is recorded per block.  Index and filter
-  // blocks are never compressed: they are read once per open and held, so
-  // there is nothing to save.
+  // keys and values with structure it makes a block a fraction of its
+  // size, which is that fraction off every table written, compacted and
+  // read from disk.  A block that would not shrink by an eighth is stored
+  // as it was, so on data with no structure the cost of asking is a pass
+  // over each block at write time and nothing at read time.  What it
+  // costs a read is a decode per block the cache did not answer, and on
+  // this engine's benchmark that decode is cheaper than the bytes it
+  // saves, so reads get faster too.  On by default since 0.3.0.  kNone is
+  // for values that are already compressed -- images, archives, encrypted
+  // bytes -- where every block would be stored raw anyway and the pass at
+  // write time is spent for nothing: docs/BENCHMARKS.md, "Where there is
+  // nothing to gain", has what that costs.  A database written with it on
+  // is read by any build from 0.2.0 on, with it on or off, since the
+  // choice is recorded per block.  Index and filter blocks are never
+  // compressed: they are read once per open and held, so there is nothing
+  // to save.
   enum class Compression { kNone, kLz };
-  Compression compression = Compression::kNone;
+  Compression compression = Compression::kLz;
 
   // The largest a table file may grow during a compaction.
   size_t max_file_size = 2 * 1024 * 1024;

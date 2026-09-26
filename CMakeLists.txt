@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 # The version here and ambar::kVersion in include/ambar/db.hpp are the same
 # number by hand; the test below fails the build if they drift apart.
-project(ambar VERSION 0.2.0 LANGUAGES CXX)
+project(ambar VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

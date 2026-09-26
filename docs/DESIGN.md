@@ -550,8 +550,8 @@ file set.
 
 ### Compression
 
-With `Options::compression` set, each data block goes through
-`src/compress.hpp` on its way to disk: an LZ77 coder in the shape of LZ4 —
+Each data block goes through `src/compress.hpp` on its way to disk, unless
+`Options::compression` says not to: an LZ77 coder in the shape of LZ4 —
 a varint length, then tokens of literals and back-references — written here
 rather than taken from a library, because a decoder is a parser of untrusted
 bytes and every such parser in this project is its own, fuzzed
@@ -591,9 +591,10 @@ written, compacted and read from disk.
 
 ### Format stability
 
-The layout above is the format of version 0.2.0, and `ambar::kVersion` in
-the public header says which version a build is. Before 1.0 the format may
-change between minor versions, and a database written by one is not promised
+The layout above is the format of versions 0.2.0 and 0.3.0, and
+`ambar::kVersion` in the public header says which version a build is.
+Before 1.0 the format may change between minor versions, and a database
+written by one is not promised
 to open under another: a table's footer carries a magic number that says
 what kind of file it is, and nothing on disk says which version wrote it, so
 in general an older build reading a newer file would fail a checksum or a
@@ -615,7 +616,14 @@ this section says what changed and from which version.
   compressed. A 0.2.0 build says the same of a type byte it does not know,
   as `kNotSupported` rather than `kCorruption`, because the checksum that
   covers the byte has passed. Whether a build writes compressed blocks is
-  `Options::compression`, off by default.
+  `Options::compression`.
+* **0.3.0 — data blocks are compressed by default.** The format is 0.2.0's,
+  byte for byte; what changed is `Options::compression`, which is now on
+  unless set off, so a database a 0.3.0 build writes with default options
+  holds compressed blocks where a 0.2.0 build's held raw ones. A 0.2.0
+  build reads it; a 0.1.0 build refuses its data blocks by name, as above.
+  A database written by 0.2.0 or 0.1.0 is read unchanged, and its tables
+  are compressed as compaction rewrites them.
 
 ## Compaction
 

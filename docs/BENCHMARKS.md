@@ -19,6 +19,10 @@ and the absolute numbers as local.**
 Every figure below is the median of three runs, and the three agreed within a
 few percent except where noted.
 
+Every section before *Compression* was measured with block compression off,
+which was the default before 0.3.0, and `--compression none` reproduces it.
+Compression is on by default now, and *Compression* has both.
+
 SQLite is configured as a user running a key-value workload would configure it:
 WAL journalling, `synchronous=NORMAL`, one transaction per thousand rows. Its
 defaults would have been a comparison against a configuration nobody uses.
@@ -27,7 +31,7 @@ Reproduce with:
 
     cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
     cmake --build build-release
-    ./build-release/ambar_bench /tmp/bench --keys 1000000 --value-size 100
+    ./build-release/ambar_bench /tmp/bench --keys 1000000 --value-size 100 --compression none
 
 Benchmarking a Debug build measures the assertions, not the engine — it runs
 about three times slower. If a number here looks unreachable, check the build
@@ -445,9 +449,10 @@ tables are medians.
 
 ## Compression
 
-`Options::compression` is off by default, and every figure above is with it
-off. This is the same benchmark with it on — the same million keys, the
-same 100-byte values, half random and half repeated so that compression is
+Every figure above is with compression off, the default before 0.3.0, and
+it is on by default now. This is the same benchmark with it on — the same
+million keys, the same 100-byte values, half random and half repeated so
+that compression is
 neither pointless nor free — on the Windows machine of the sections above,
 each table the median of three runs, and a run of the coder table the
 best of five passes. Two things were measured: the coder on its own,
@@ -623,7 +628,8 @@ off and on: 80,400 and 100,200 cache-missing lookups a second (p50 12.3
 and 9.5 µs), 60,200 and 90,000 random writes, and a cold scan 2,418,000
 and 2,786,000. Reproduce with:
 
-    ./build/ambar_bench /tmp/bench --keys 1000000 --value-size 100 --compression lz
+    ./build/ambar_bench /tmp/bench --keys 1000000 --value-size 100
+    ./build/ambar_bench /tmp/bench --keys 1000000 --value-size 100 --compression none
     ./build/ambar_codec_bench /tmp/bench/ambar --dump blocks.bin
     python3 tools/compare_codecs.py blocks.bin      # pip install lz4, optionally
 

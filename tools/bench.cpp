@@ -84,10 +84,10 @@ struct Config {
   // phases with no flush and no compaction in the way, which is the
   // writer queue on its own.  Both are worth seeing, and they differ.
   int write_buffer_mb = 4;
-  // Off is the engine as configured.  The same run with it on is what
-  // compression costs a write and a read and saves on disk, and the two
-  // are read side by side in docs/BENCHMARKS.md.
-  Options::Compression compression = Options::Compression::kNone;
+  // The engine as configured unless asked otherwise: on since 0.3.0.  The
+  // same run with --compression none is what compression saves and costs,
+  // and the two are read side by side in docs/BENCHMARKS.md.
+  Options::Compression compression = Options().compression;
   bool use_sqlite = true;
 };
 

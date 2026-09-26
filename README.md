@@ -44,10 +44,11 @@ ambar::Status status = db->get(ambar::ReadOptions(), "key", &value);
   has open is refused rather than allowed to destroy both copies.
 * **Damaged files produce errors, not crashes.** Every table file is treated as
   untrusted input.
-* **Optional block compression.** An LZ77 coder written here, so that its
-  decoder is fuzzed and bounded like every other parser in the engine; the
-  choice is recorded per block, and a file written with it on is read by a
-  build with it off.
+* **Block compression, on by default.** An LZ77 coder written here, so that
+  its decoder is fuzzed and bounded like every other parser in the engine;
+  the choice is recorded per block, a block is stored raw unless compressing
+  it saves an eighth, and a file written with it on is read by a build with
+  it off.
 * **Repair.** A database whose manifest is lost or damaged is refused rather
   than guessed at, and `ambar_repair` rebuilds it from the table and log files
   that survive -- keeping what reads back, setting aside what does not, merging
@@ -274,7 +275,7 @@ engine, and the comment says what still is not.
     cmake --build build
     ./build/ambar_tests
 
-250 tests, no external framework. Also:
+251 tests, no external framework. Also:
 
     cmake -S . -B build-asan -DAMBAR_SANITIZE=address   # ASan + UBSan
     cmake -S . -B build-tsan -DAMBAR_SANITIZE=thread    # ThreadSanitizer
@@ -355,7 +356,7 @@ scaling: random reads on one to eight threads, with the database on disk
 and with it held entirely in memory, where the engine's own locks are all
 that is left to measure; and synced writes on one to eight threads, beside
 the number of batches each `fsync` carried, which is what group commit is
-for. The same run with `--compression lz` is what compression costs and
+for. The same run with `--compression none` is what compression costs and
 saves; `ambar_codec_bench` with `tools/compare_codecs.py` puts the block
 coder beside zlib and LZ4 on the same blocks; and `ambar_lookup_probe` runs
 resident lookups on an existing database by thread count and working set,

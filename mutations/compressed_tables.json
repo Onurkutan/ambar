@@ -1,5 +1,5 @@
 {
-  "_comment": "Compression in the table format: the builder's choice per block, the trailer byte that records it, and the reader's handling of it. compress.json covers the codec; these are the seams around it. tests/test_compressed_tables.cpp catches each: a builder that ignores the option, or compresses the index, or keeps the compressed bytes when they are larger, changes the sizes and trailer bytes the tests read off disk; a builder that writes compressed bytes under the raw type, or a reader that skips the decode, hands a stream to the block parser; a reader that drops a decode failure, or reads an unknown type as raw, loses the refusal the forged-checksum test looks for by name; a reader that keeps decoded blocks out of the cache, or charges what was on disk, changes what the cache reports holding.",
+  "_comment": "Compression in the table format: the builder's choice per block, the trailer byte that records it, and the reader's handling of it. compress.json covers the codec; these are the seams around it. tests/test_compressed_tables.cpp catches each: a builder that ignores the option, or compresses the index, or keeps the compressed bytes when they are larger, changes the sizes and trailer bytes the tests read off disk; a builder that writes compressed bytes under the raw type, or a reader that skips the decode, hands a stream to the block parser; a reader that drops a decode failure, or reads an unknown type as raw, loses the refusal the forged-checksum test looks for by name; a reader that keeps decoded blocks out of the cache, or charges what was on disk, changes what the cache reports holding. And the default: a build that left compression off unless asked would still pass every test that asks, so one test opens a database with default options and reads the type byte of the block it wrote.",
   "builder: compress every data block whatever the option says": [
     "src/table_builder.cpp",
     "  if (compressible && options_.compression == Options::Compression::kLz) {",
@@ -54,5 +54,10 @@
     "src/table.cpp",
     "      const size_t charge =\n          block->size() > 0 ? block->size() : sizeof(Block) + key.size();",
     "      const size_t charge = handle.size() > 0\n                                ? static_cast<size_t>(handle.size())\n                                : sizeof(Block) + key.size();"
+  ],
+  "options: leave compression off by default": [
+    "include/ambar/options.hpp",
+    "  Compression compression = Compression::kLz;",
+    "  Compression compression = Compression::kNone;"
   ]
 }
